@@ -1,0 +1,12 @@
+{
+  "name": "test-target",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Sample legacy codebase used to demo AutoRefactor AI's refactoring pipeline.",
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

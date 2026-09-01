@@ -1,0 +1,48 @@
+{
+  "name": "autorefactor-ai",
+  "version": "0.1.0",
+  "description": "Autonomous agentic codebase refactoring engine using CST parsing, dependency graphs, and self-healing verification loops.",
+  "type": "module",
+  "bin": {
+    "autorefactor": "./bin/autorefactor.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "cli": "tsx bin/autorefactor.ts",
+    "dev:server": "tsx src/server/app.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "ts-morph": "^23.0.0",
+    "typescript": "^5.5.4",
+    "ai": "^3.4.0",
+    "@ai-sdk/openai": "^0.0.66",
+    "@ai-sdk/anthropic": "^0.0.53",
+    "zod": "^3.23.8",
+    "commander": "^12.1.0",
+    "chalk": "^5.3.0",
+    "ora": "^8.1.0",
+    "winston": "^3.14.2",
+    "simple-git": "^3.27.0",
+    "octokit": "^4.0.2",
+    "express": "^4.21.0",
+    "dotenv": "^16.4.5",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1",
+    "vitest": "^2.1.1",
+    "@types/node": "^22.5.5",
+    "@types/express": "^4.17.21",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^9.10.0",
+    "@typescript-eslint/parser": "^8.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

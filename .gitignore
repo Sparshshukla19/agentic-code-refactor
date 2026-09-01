@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.log
+logs/
+.DS_Store
+coverage/
+test-target/node_modules/
+agent/agent-*.branch
