@@ -68,42 +68,20 @@ Modern Large Language Models (LLMs) have transformed software engineering workfl
 
 A high-performance CLI utility that sits directly between the local developer environment and LLM endpoints, applying deterministic pre-flight token reduction before API dispatch.
 
-```mermaid
-flowchart TD
-    subgraph Workspace["1. Developer Workspace"]
-        A[Git Diff / Modified Files / Error Logs]
-    end
+## 3. Proposed Solution
 
-    subgraph Compression["2. TokenCLI Pre-Flight Optimizer (35% - 55% Token Reduction)"]
-        B1["AST Skeletons<br/>(Signatures & Types Only)"]
-        B2["Targeted Diff Slicing<br/>(git diff -U2)"]
-        B3["Relevance Pruning<br/>(Local Lexical Search)"]
-        B4["Secret Sanitization<br/>(.env & API Key Scrubbing)"]
-        
-        A --> B1
-        A --> B2
-        A --> B3
-        A --> B4
-    end
+TokenCLI acts as a lightweight pre-flight compression proxy on your local machine. Before any prompt leaves your terminal, it deterministically extracts only the essential code and data needed for the task, cutting payload size in half.
 
-    subgraph Router["3. Dynamic Model Router"]
-        C1["Lightweight Tasks & Quick Fixes<br/>➔ Fast/Mini Models"]
-        C2["Complex Logic & Architecture<br/>➔ Flagship Reasoning Models"]
-        
-        B1 & B2 & B3 & B4 --> Router
-        Router --> C1
-        Router --> C2
-    end
+### How It Works in 4 Steps:
 
-    subgraph Output["4. Developer Terminal"]
-        D["⚡ Instant Low-Latency Streaming Response"]
-        C1 --> D
-        C2 --> D
-    end
-
-    classDef default fill:#1e1e2e,stroke:#89b4fa,stroke-width:1px,color:#cdd6f4;
-    classDef sub fill:#181825,stroke:#45475a,stroke-width:1px,color:#cdd6f4;
-    class Workspace,Compression,Router,Output sub;
+1. **Local Context Capture:** The CLI inspects only the target workspace files, git changes (`git diff -U2`), or terminal error logs.
+2. **Deterministic Pre-Flight Compression:**
+   * **AST Skeletons:** Removes function bodies and implementation details, keeping only exported functions, classes, and types.
+   * **Diff Slicing:** Isolates the exact lines changed rather than attaching entire source files.
+   * **Relevance Filtering:** Pulls in only directly referenced dependencies using fast local indexing.
+   * **Secret Redaction:** Strips `.env` keys and sensitive tokens on your device before network transmission.
+3. **Dynamic Model Routing:** Automatically dispatches quick/simple fixes to lightweight, low-cost models (e.g., Flash / Mini) and reserves large reasoning models for complex refactors.
+4. **Fast Terminal Streaming:** Delivers the optimized response directly into your terminal output in real time without lag.
 
 
 ### Core Architecture Highlights
