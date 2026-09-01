@@ -68,34 +68,42 @@ Modern Large Language Models (LLMs) have transformed software engineering workfl
 
 A high-performance CLI utility that sits directly between the local developer environment and LLM endpoints, applying deterministic pre-flight token reduction before API dispatch.
 
-+-------------------------------------------------------------------------------+
-|                             DEVELOPER WORKSPACE                               |
-|   (Git Status / Working Tree / Error Logs / Multi-File Context)               |
-+---------------------------------------+---------------------------------------+
-|
-v
-+-------------------------------------------------------------------------------+
-|                       TOKENCLI PRE-FLIGHT COMPRESSOR                          |
-|  +---------------------+  +---------------------+  +-----------------------+  |
-|  | AST Skeletons       |  | Diff Slicing        |  | Dynamic BM25 / RAG    |  |
-|  | (Signatures & Types)|  | (Git -U2 Context)   |  | (Prune Unused Code)   |  |
-|  +---------------------+  +---------------------+  +-----------------------+  |
-|  +-------------------------------------------------------------------------+  |
-|  | Secret Sanitization (.env & API key masking) + Schema Output Enforcer   |  |
-|  +-------------------------------------------------------------------------+  |
-+---------------------------------------+---------------------------------------+
-| (35% - 55% Reduced Payload)
-v
-+-------------------------------------------------------------------------------+
-|                         MODEL ORCHESTRATION LAYER                             |
-|  * Lightweight Queries  ---> High-Speed Small Models (e.g., Flash / Mini)     |
-|  * Complex Architecture ---> Flagship Models (Reasoning-Grade)                |
-+---------------------------------------+---------------------------------------+
-|
-v
-+-------------------------------------------------------------------------------+
-|                    INSTANT STREAMING TERMINAL RESPONSE                        |
-+-------------------------------------------------------------------------------+
+```mermaid
+flowchart TD
+    subgraph Workspace["1. Developer Workspace"]
+        A[Git Diff / Modified Files / Error Logs]
+    end
+
+    subgraph Compression["2. TokenCLI Pre-Flight Optimizer (35% - 55% Token Reduction)"]
+        B1["AST Skeletons<br/>(Signatures & Types Only)"]
+        B2["Targeted Diff Slicing<br/>(git diff -U2)"]
+        B3["Relevance Pruning<br/>(Local Lexical Search)"]
+        B4["Secret Sanitization<br/>(.env & API Key Scrubbing)"]
+        
+        A --> B1
+        A --> B2
+        A --> B3
+        A --> B4
+    end
+
+    subgraph Router["3. Dynamic Model Router"]
+        C1["Lightweight Tasks & Quick Fixes<br/>➔ Fast/Mini Models"]
+        C2["Complex Logic & Architecture<br/>➔ Flagship Reasoning Models"]
+        
+        B1 & B2 & B3 & B4 --> Router
+        Router --> C1
+        Router --> C2
+    end
+
+    subgraph Output["4. Developer Terminal"]
+        D["⚡ Instant Low-Latency Streaming Response"]
+        C1 --> D
+        C2 --> D
+    end
+
+    classDef default fill:#1e1e2e,stroke:#89b4fa,stroke-width:1px,color:#cdd6f4;
+    classDef sub fill:#181825,stroke:#45475a,stroke-width:1px,color:#cdd6f4;
+    class Workspace,Compression,Router,Output sub;
 
 
 ### Core Architecture Highlights
