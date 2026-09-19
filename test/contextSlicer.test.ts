@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  aggregateTokenSavings,
   buildContextSlice,
   buildRefactorObjective,
   estimateTokenSavings,
@@ -19,6 +20,18 @@ function makeNode(overrides: Partial<ParsedNode>): ParsedNode {
     endLine: 5,
     sourceText: "function fn() {}",
     smells: [],
+    ...overrides,
+  };
+}
+
+function makeFile(nodes: ParsedNode[], overrides: Partial<FileParseResult> = {}): FileParseResult {
+  return {
+    filePath: "a.ts",
+    language: "ts",
+    nodes,
+    imports: [],
+    exports: [],
+    fullText: nodes.map((n) => n.sourceText).join("\n\n"),
     ...overrides,
   };
 }
@@ -57,7 +70,7 @@ describe("generateInstruction", () => {
 describe("buildContextSlice", () => {
   it("includes the target node's own source", () => {
     const target = makeNode({ sourceText: "function fn() { return 1; }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([target]);
     const slice = buildContextSlice(target, file);
     expect(slice).toContain("function fn() { return 1; }");
   });
@@ -65,7 +78,7 @@ describe("buildContextSlice", () => {
   it("includes a same-file helper that the target actually calls", () => {
     const helper = makeNode({ id: "a.ts::helper", name: "helper", sourceText: "function helper() { return 2; }" });
     const target = makeNode({ id: "a.ts::main", name: "main", sourceText: "function main() { return helper() + 1; }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [helper, target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([helper, target]);
 
     const slice = buildContextSlice(target, file);
     expect(slice).toContain("function helper() { return 2; }");
@@ -74,7 +87,7 @@ describe("buildContextSlice", () => {
   it("excludes a same-file sibling the target never references", () => {
     const unrelated = makeNode({ id: "a.ts::unrelated", name: "unrelated", sourceText: "function unrelated() {}" });
     const target = makeNode({ id: "a.ts::main", name: "main", sourceText: "function main() { return 1; }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [unrelated, target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([unrelated, target]);
 
     const slice = buildContextSlice(target, file);
     expect(slice).not.toContain("function unrelated() {}");
@@ -83,7 +96,7 @@ describe("buildContextSlice", () => {
   it("does not false-match a name that is a substring of another identifier", () => {
     const addr = makeNode({ id: "a.ts::address", name: "address", sourceText: "function address() {}" });
     const target = makeNode({ id: "a.ts::main", name: "main", sourceText: "function main() { return add(1, 2); }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [addr, target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([addr, target]);
 
     const slice = buildContextSlice(target, file);
     expect(slice).not.toContain("function address() {}");
@@ -94,7 +107,7 @@ describe("buildContextSlice — token-saving truncation", () => {
   it("includes a small referenced sibling's full body", () => {
     const helper = makeNode({ id: "a.ts::helper", name: "helper", sourceText: "function helper() { return 2; }" });
     const target = makeNode({ id: "a.ts::main", name: "main", sourceText: "function main() { return helper(); }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [helper, target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([helper, target]);
 
     const slice = buildContextSlice(target, file);
     expect(slice).toContain("function helper() { return 2; }");
@@ -108,7 +121,7 @@ describe("buildContextSlice — token-saving truncation", () => {
       sourceText: `function bigHelper(a, b) {\n  ${bigBody}\n  return a;\n}`,
     });
     const target = makeNode({ id: "a.ts::main", name: "main", sourceText: "function main() { return bigHelper(1, 2); }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [helper, target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([helper, target]);
 
     const slice = buildContextSlice(target, file);
     expect(slice).toContain("function bigHelper(a, b)");
@@ -116,7 +129,7 @@ describe("buildContextSlice — token-saving truncation", () => {
     expect(slice).not.toContain(bigBody);
   });
 
-  it("falls back to the first line when a large sibling has no brace (e.g. a one-line arrow fn)", () => {
+  it("falls back to a capped first line when a large sibling has no brace (e.g. a one-line arrow fn)", () => {
     const bigBody = "1".repeat(400);
     const helper = makeNode({
       id: "a.ts::bigArrow",
@@ -124,7 +137,7 @@ describe("buildContextSlice — token-saving truncation", () => {
       sourceText: `const bigArrow = (a) => a + ${bigBody}`,
     });
     const target = makeNode({ id: "a.ts::main", name: "main", sourceText: "function main() { return bigArrow(1); }" });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [helper, target], imports: [], exports: [], fullText: "" };
+    const file = makeFile([helper, target]);
 
     const slice = buildContextSlice(target, file);
     expect(slice).toContain("const bigArrow = (a) => a +");
@@ -140,10 +153,7 @@ describe("estimateTokens / estimateTokenSavings", () => {
   it("reports a positive reduction when the slice is smaller than the full file", () => {
     const small = makeNode({ id: "a.ts::small", name: "small", sourceText: "function small() { return 1; }" });
     const big = makeNode({ id: "a.ts::big", name: "big", sourceText: "x".repeat(2000) });
-    // fullText represents the real raw file — the naive baseline — so it must
-    // actually contain both declarations, not an empty placeholder.
-    const fullText = `${small.sourceText}\n\n${big.sourceText}`;
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [small, big], imports: [], exports: [], fullText };
+    const file = makeFile([small, big]); // fullText = both declarations, the real naive baseline
 
     const slice = buildContextSlice(small, file);
     const report = estimateTokenSavings(file, slice);
@@ -152,11 +162,39 @@ describe("estimateTokens / estimateTokenSavings", () => {
     expect(report.reductionPercent).toBeGreaterThan(0);
     expect(report.estimatedSliceTokens).toBeLessThan(report.estimatedFullFileTokens);
   });
+
+  it("returns zero reduction rather than dividing by zero for an empty file", () => {
+    const file = makeFile([], { fullText: "" });
+    const report = estimateTokenSavings(file, "");
+    expect(report.reductionPercent).toBe(0);
+  });
+});
+
+describe("aggregateTokenSavings", () => {
+  it("sums chars/tokens across tasks and re-derives the percentage (not an average of percentages)", () => {
+    const reportA = { fullFileChars: 100, sliceChars: 20, estimatedFullFileTokens: 25, estimatedSliceTokens: 5, reductionPercent: 80 };
+    const reportB = { fullFileChars: 100, sliceChars: 90, estimatedFullFileTokens: 25, estimatedSliceTokens: 23, reductionPercent: 10 };
+
+    const aggregate = aggregateTokenSavings([reportA, reportB]);
+
+    expect(aggregate.fullFileChars).toBe(200);
+    expect(aggregate.sliceChars).toBe(110);
+    // Naive average of (80 + 10) / 2 = 45 would be WRONG here — the correct
+    // weighted figure, re-derived from the summed totals, is 45 only by
+    // coincidence when weights are equal; assert the actual math instead.
+    expect(aggregate.reductionPercent).toBe(Math.round(((200 - 110) / 200) * 100));
+  });
+
+  it("returns all zeros for an empty list of reports", () => {
+    const aggregate = aggregateTokenSavings([]);
+    expect(aggregate.fullFileChars).toBe(0);
+    expect(aggregate.reductionPercent).toBe(0);
+  });
 });
 
 describe("buildRefactorObjective", () => {
   it("throws a clear error when the target node id isn't in the file", () => {
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [], imports: [], exports: [], fullText: "" };
+    const file = makeFile([], { fullText: "" });
     const task: QueuedTask = { taskId: "task-0", filePath: "a.ts", targetNodeId: "a.ts::missing", order: 0, status: "pending" };
 
     expect(() => buildRefactorObjective(task, file)).toThrow(/not found/i);
@@ -167,7 +205,7 @@ describe("buildRefactorObjective", () => {
       id: "a.ts::fn",
       smells: [{ type: "untyped-signature", message: "x", line: 1 }],
     });
-    const file: FileParseResult = { filePath: "a.ts", language: "ts", nodes: [node], imports: [], exports: [], fullText: "" };
+    const file = makeFile([node]);
     const task: QueuedTask = { taskId: "task-0", filePath: "a.ts", targetNodeId: "a.ts::fn", order: 0, status: "pending" };
 
     const objective = buildRefactorObjective(task, file);

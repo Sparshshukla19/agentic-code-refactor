@@ -36,4 +36,5 @@ export interface FileParseResult {
   nodes: ParsedNode[];
   imports: string[]; // resolved import specifiers found in this file
   exports: string[]; // exported symbol names
+  fullText: string; // the file's raw source — the naive "send the whole file" baseline for token-savings comparisons
 }

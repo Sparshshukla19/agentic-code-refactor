@@ -56,6 +56,7 @@ export function parseSourceFile(sourceFile: SourceFile): FileParseResult {
     nodes,
     imports: getImportSpecifiers(sourceFile),
     exports: getExportNames(sourceFile),
+    fullText: sourceFile.getFullText(),
   };
 }
 

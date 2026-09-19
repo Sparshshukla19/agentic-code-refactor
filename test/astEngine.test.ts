@@ -43,4 +43,10 @@ describe("astEngine.parseFiles", () => {
     const clampFn = result.nodes.find((n) => n.name === "clamp");
     expect(clampFn?.smells.map((s) => s.type)).not.toContain("no-error-handling");
   });
+
+  it("captures the raw full file text for token-savings baselines", () => {
+    const [result] = parseFiles([targetPath("mathUtils.js")]);
+    expect(result.fullText.length).toBeGreaterThan(0);
+    expect(result.fullText).toContain("module.exports");
+  });
 });

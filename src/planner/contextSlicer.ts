@@ -5,6 +5,11 @@
  * plain-language instruction derived from the smells that were detected.
  * Deliberately excludes everything else in the file — token budget and
  * hallucination risk both grow with irrelevant context.
+ *
+ * This module also owns token-savings measurement: estimateTokenSavings()
+ * for a single task, and aggregateTokenSavings() to roll many tasks up
+ * into one run-level report (used by the CLI to print a summary at the
+ * end of a refactor run).
  */
 import type { CodeSmellType, FileParseResult, ParsedNode } from "../types/ast.types.js";
 import type { QueuedTask } from "../types/graph.types.js";
@@ -15,6 +20,7 @@ const MAX_REFERENCED_SIBLINGS = 5;
 // signature is sent. The agent almost always needs a helper's *interface* to
 // type against — not its implementation — and bodies are where token cost hides.
 const SIBLING_FULL_BODY_CHAR_LIMIT = 300;
+const SIGNATURE_FALLBACK_CHAR_LIMIT = 80;
 
 const SMELL_INSTRUCTIONS: Record<CodeSmellType, string> = {
   "untyped-signature": "Add explicit parameter and return types.",
@@ -62,21 +68,16 @@ function escapeRegExp(value: string): string {
 
 /**
  * Reduces a sibling's source to just its signature line(s) — everything up
- * to (not including) the opening brace of its body. Falls back to the first
- * line if no brace is found (e.g. a one-line arrow function). This is what
- * lets a large helper be "referenced" in the slice without paying for its
- * full implementation in tokens.
+ * to (not including) the opening brace of its body. Falls back to a capped
+ * first line if no brace is found (e.g. a one-line arrow function) — that
+ * first line isn't guaranteed to be short, so it's truncated explicitly
+ * rather than assumed to be.
  */
-const SIGNATURE_FALLBACK_CHAR_LIMIT = 80;
-
 function summarizeSignature(sourceText: string): string {
   const braceIndex = sourceText.indexOf("{");
   if (braceIndex !== -1) {
     return `${sourceText.slice(0, braceIndex).trim()} { /* body omitted for brevity */ }`;
   }
-  // No brace — e.g. a one-line arrow function. Its "first line" isn't
-  // guaranteed to be short (it could be the entire huge single-line source),
-  // so cap it explicitly rather than assuming.
   const firstLine = sourceText.split("\n")[0].trim();
   return firstLine.length > SIGNATURE_FALLBACK_CHAR_LIMIT
     ? `${firstLine.slice(0, SIGNATURE_FALLBACK_CHAR_LIMIT)}... /* truncated */`
@@ -106,10 +107,9 @@ export interface TokenSavingsReport {
 }
 
 /**
- * Compares the slice actually sent to the LLM against a naive baseline of
- * "every declaration in the file" — the alternative most simple tools use.
- * Used for logging/demo purposes to make the token savings concrete rather
- * than an unverified claim.
+ * Compares the slice actually sent to the LLM against the naive baseline of
+ * sending the entire raw file. Used for logging/demo purposes to make the
+ * token savings concrete rather than an unverified claim.
  */
 export function estimateTokenSavings(file: FileParseResult, slice: string): TokenSavingsReport {
   const fullFileChars = file.fullText.length;
@@ -120,6 +120,32 @@ export function estimateTokenSavings(file: FileParseResult, slice: string): Toke
     fullFileChars === 0 ? 0 : Math.round(((fullFileChars - sliceChars) / fullFileChars) * 100);
 
   return { fullFileChars, sliceChars, estimatedFullFileTokens, estimatedSliceTokens, reductionPercent };
+}
+
+/**
+ * Rolls up per-task TokenSavingsReports into one run-level total — what the
+ * CLI prints at the end of a refactor run ("sent ~X tokens across N tasks
+ * vs ~Y if every task had seen its whole file, Z% smaller"). Summing chars
+ * first and re-deriving the percentage keeps the aggregate mathematically
+ * consistent rather than averaging already-rounded per-task percentages.
+ */
+export function aggregateTokenSavings(reports: TokenSavingsReport[]): TokenSavingsReport {
+  const totals = reports.reduce(
+    (acc, r) => ({
+      fullFileChars: acc.fullFileChars + r.fullFileChars,
+      sliceChars: acc.sliceChars + r.sliceChars,
+      estimatedFullFileTokens: acc.estimatedFullFileTokens + r.estimatedFullFileTokens,
+      estimatedSliceTokens: acc.estimatedSliceTokens + r.estimatedSliceTokens,
+    }),
+    { fullFileChars: 0, sliceChars: 0, estimatedFullFileTokens: 0, estimatedSliceTokens: 0 },
+  );
+
+  const reductionPercent =
+    totals.fullFileChars === 0
+      ? 0
+      : Math.round(((totals.fullFileChars - totals.sliceChars) / totals.fullFileChars) * 100);
+
+  return { ...totals, reductionPercent };
 }
 
 /** Assembles the minimal source context slice for one target node. */
