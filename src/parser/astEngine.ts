@@ -79,6 +79,7 @@ type SmellableNode =
 
 function toParsedNode(node: SmellableNode, kind: NodeKind, filePath: string): ParsedNode {
   const name = getNodeName(node, kind);
+  const complexity = computeCyclomaticComplexity(node, kind);
   return {
     id: `${filePath}::${name}`,
     kind,
@@ -87,7 +88,8 @@ function toParsedNode(node: SmellableNode, kind: NodeKind, filePath: string): Pa
     startLine: node.getStartLineNumber(),
     endLine: node.getEndLineNumber(),
     sourceText: node.getText(),
-    smells: detectSmells(node),
+    complexity,
+    smells: detectSmells(node, complexity),
   };
 }
 
@@ -154,7 +156,56 @@ function getCommonJsExportNames(sourceFile: SourceFile): string[] {
   return Array.from(names);
 }
 
-function detectSmells(node: SmellableNode): CodeSmell[] {
+// McCabe's own widely-cited guidance: complexity above ~10 is where a
+// function starts becoming hard to reason about and test exhaustively —
+// this is the threshold that turns a raw number into a "should be
+// refactored" signal.
+const COMPLEXITY_THRESHOLD = 10;
+
+/**
+ * Cyclomatic complexity: start at 1 (one baseline path through the code),
+ * and add 1 for every point where execution can branch — an `if`, a loop,
+ * a `catch`, a `case`, a ternary, or a short-circuit `&&`/`||`. This is the
+ * standard McCabe formula.
+ *
+ * One deliberate departure from the textbook version: this walks INTO
+ * nested function/callback bodies too, rather than stopping at the
+ * function boundary. Normally each nested function would get its own
+ * separate complexity score — but astEngine only extracts NAMED
+ * declarations as their own nodes (see parseSourceFile), so an anonymous
+ * callback passed as an argument is never tracked as its own refactor
+ * target. Its branching is real complexity the outer function carries, so
+ * folding it in here is what makes "callback hell" actually score as
+ * complex rather than invisible.
+ */
+function computeCyclomaticComplexity(node: SmellableNode, kind: NodeKind): number {
+  if (kind !== "function" && kind !== "method") return 1; // no branching concept for these kinds
+
+  let complexity = 1;
+  node.forEachDescendant((n) => {
+    if (
+      Node.isIfStatement(n) ||
+      Node.isForStatement(n) ||
+      Node.isForInStatement(n) ||
+      Node.isForOfStatement(n) ||
+      Node.isWhileStatement(n) ||
+      Node.isDoStatement(n) ||
+      Node.isCatchClause(n) ||
+      Node.isConditionalExpression(n) || // ternary
+      Node.isCaseClause(n)
+    ) {
+      complexity++;
+    } else if (Node.isBinaryExpression(n)) {
+      const opKind = n.getOperatorToken().getKind();
+      if (opKind === SyntaxKind.AmpersandAmpersandToken || opKind === SyntaxKind.BarBarToken) {
+        complexity++;
+      }
+    }
+  });
+  return complexity;
+}
+
+function detectSmells(node: SmellableNode, complexity: number): CodeSmell[] {
   const smells: CodeSmell[] = [];
   const line = node.getStartLineNumber();
 
@@ -162,6 +213,13 @@ function detectSmells(node: SmellableNode): CodeSmell[] {
   pushIf(smells, hasCallbackHell(node), "callback-hell", "Nested callback parameters exceed depth threshold", line);
   pushIf(smells, hasVarUsage(node), "var-usage", "Uses `var` instead of `let`/`const`", line);
   pushIf(smells, hasNoErrorHandling(node), "no-error-handling", "Async/callback logic with no visible error handling", line);
+  pushIf(
+    smells,
+    complexity > COMPLEXITY_THRESHOLD,
+    "high-complexity",
+    `Cyclomatic complexity is ${complexity} (McCabe threshold: ${COMPLEXITY_THRESHOLD})`,
+    line,
+  );
 
   return smells;
 }

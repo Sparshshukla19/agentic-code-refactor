@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import path from "node:path";
 import { parseFiles } from "../src/parser/astEngine.js";
-import { buildDependencyGraph, CircularDependencyError, createDependencyGraph } from "../src/parser/dependencyGraph.js";
+import {
+  buildDependencyGraph,
+  CircularDependencyError,
+  createDependencyGraph,
+  normalizePath,
+} from "../src/parser/dependencyGraph.js";
 
-const targetPath = (name: string) => path.resolve("test-target/src", name);
+// normalizePath matters here specifically because path.resolve() returns
+// backslash-separated paths on Windows, while the graph's keys (sourced from
+// ts-morph) are always forward-slash. Without this, every lookup below would
+// silently fail to match on Windows only — passing on Linux/Mac would hide it.
+const targetPath = (name: string) => normalizePath(path.resolve("test-target/src", name));
 
 describe("buildDependencyGraph + topologicalOrder", () => {
   it("orders mathUtils before userController, since userController requires it", () => {

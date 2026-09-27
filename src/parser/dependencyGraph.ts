@@ -9,6 +9,18 @@ import type { FileParseResult } from "../types/ast.types.js";
 
 const RESOLVABLE_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx"];
 
+/**
+ * ts-morph (and the TypeScript compiler API it wraps) always normalizes file
+ * paths to forward slashes, on every OS. Node's own path.resolve()/path.join()
+ * return backslash-separated paths on Windows. Mixing the two means the same
+ * file produces two different strings — and every Map key / Set lookup in
+ * this graph silently fails to match. Every path that becomes a graph key,
+ * or gets compared against one, is normalized through this function first.
+ */
+export function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/");
+}
+
 /** Thrown when the graph contains a cycle, so topologicalOrder() can't fully drain it. */
 export class CircularDependencyError extends Error {
   constructor(public readonly remainingFiles: string[]) {
@@ -21,10 +33,11 @@ class DependencyGraphImpl implements DependencyGraph {
   nodes: Map<string, GraphNode> = new Map();
 
   addNode(filePath: string): GraphNode {
-    const existing = this.nodes.get(filePath);
+    const normalized = normalizePath(filePath);
+    const existing = this.nodes.get(normalized);
     if (existing) return existing;
-    const node: GraphNode = { id: filePath, filePath, dependsOn: [], dependedOnBy: [] };
-    this.nodes.set(filePath, node);
+    const node: GraphNode = { id: normalized, filePath: normalized, dependsOn: [], dependedOnBy: [] };
+    this.nodes.set(normalized, node);
     return node;
   }
 
@@ -32,8 +45,11 @@ class DependencyGraphImpl implements DependencyGraph {
     // "fromFilePath depends on toFilePath" — toFilePath must be refactored first.
     const from = this.addNode(fromFilePath);
     const to = this.addNode(toFilePath);
-    if (!from.dependsOn.includes(toFilePath)) from.dependsOn.push(toFilePath);
-    if (!to.dependedOnBy.includes(fromFilePath)) to.dependedOnBy.push(fromFilePath);
+    // Store the NORMALIZED paths (from/to.filePath), not the raw arguments —
+    // otherwise a caller passing an unnormalized path would corrupt the edge
+    // lists even though addNode() itself is safe.
+    if (!from.dependsOn.includes(to.filePath)) from.dependsOn.push(to.filePath);
+    if (!to.dependedOnBy.includes(from.filePath)) to.dependedOnBy.push(from.filePath);
   }
 
   /**
@@ -93,12 +109,12 @@ export function resolveImportSpecifier(
   const base = path.resolve(path.dirname(fromFilePath), specifier);
 
   for (const ext of RESOLVABLE_EXTENSIONS) {
-    const candidate = base + ext;
+    const candidate = normalizePath(base + ext);
     if (knownFilePaths.has(candidate)) return candidate;
   }
   // also try as a directory with an index file: "./utils" -> "./utils/index.ts"
   for (const ext of RESOLVABLE_EXTENSIONS.filter((e) => e !== "")) {
-    const candidate = path.join(base, "index" + ext);
+    const candidate = normalizePath(path.join(base, "index" + ext));
     if (knownFilePaths.has(candidate)) return candidate;
   }
 
@@ -108,7 +124,7 @@ export function resolveImportSpecifier(
 /** Builds the full dependency graph from a batch of already-parsed files. */
 export function buildDependencyGraph(fileResults: FileParseResult[]): DependencyGraph {
   const graph = createDependencyGraph();
-  const knownFilePaths = new Set(fileResults.map((f) => f.filePath));
+  const knownFilePaths = new Set(fileResults.map((f) => normalizePath(f.filePath)));
 
   for (const file of fileResults) {
     graph.addNode(file.filePath);
@@ -117,7 +133,7 @@ export function buildDependencyGraph(fileResults: FileParseResult[]): Dependency
   for (const file of fileResults) {
     for (const specifier of file.imports) {
       const resolved = resolveImportSpecifier(file.filePath, specifier, knownFilePaths);
-      if (resolved && resolved !== file.filePath) {
+      if (resolved && resolved !== normalizePath(file.filePath)) {
         graph.addEdge(file.filePath, resolved);
       }
     }

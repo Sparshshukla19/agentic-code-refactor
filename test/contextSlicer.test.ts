@@ -19,6 +19,7 @@ function makeNode(overrides: Partial<ParsedNode>): ParsedNode {
     startLine: 1,
     endLine: 5,
     sourceText: "function fn() {}",
+    complexity: 1,
     smells: [],
     ...overrides,
   };

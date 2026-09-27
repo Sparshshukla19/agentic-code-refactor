@@ -29,6 +29,7 @@ const SMELL_INSTRUCTIONS: Record<CodeSmellType, string> = {
   "var-usage": "Replace `var` declarations with `let` or `const` as appropriate.",
   "no-error-handling": "Add proper error handling (try/catch, or an error-first check) around the async logic.",
   "duplicate-logic": "Extract the duplicated logic into a single shared helper.",
+  "high-complexity": "Break this function into smaller pieces to reduce branching complexity.",
 };
 
 /** Builds the plain-language refactor instruction from a node's detected smells. */

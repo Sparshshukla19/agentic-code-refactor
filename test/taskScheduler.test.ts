@@ -16,13 +16,21 @@ function makeNode(overrides: Partial<ParsedNode>): ParsedNode {
     startLine: 1,
     endLine: 5,
     sourceText: "function fn() {}",
+    complexity: 1,
     smells: [],
     ...overrides,
   };
 }
 
 function makeFile(filePath: string, nodes: ParsedNode[]): FileParseResult {
-  return { filePath, language: "ts", nodes, imports: [], exports: [] };
+  return {
+    filePath,
+    language: "ts",
+    nodes,
+    imports: [],
+    exports: [],
+    fullText: nodes.map((n) => n.sourceText).join("\n"),
+  };
 }
 
 describe("scheduleTasks", () => {

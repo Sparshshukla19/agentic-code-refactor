@@ -9,7 +9,8 @@ export type CodeSmellType =
   | "implicit-any"
   | "var-usage"
   | "no-error-handling"
-  | "duplicate-logic";
+  | "duplicate-logic"
+  | "high-complexity";
 
 export type NodeKind = "function" | "class" | "method" | "interface" | "type-alias" | "variable";
 
@@ -27,6 +28,7 @@ export interface ParsedNode {
   startLine: number;
   endLine: number;
   sourceText: string;
+  complexity: number; // McCabe cyclomatic complexity — see astEngine.ts for how it's computed
   smells: CodeSmell[];
 }
 
