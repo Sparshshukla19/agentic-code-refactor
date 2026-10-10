@@ -19,10 +19,18 @@ export interface RefactorPatch {
 
 export type AgentToolName = "propose_patch" | "request_more_context" | "abort_task";
 
-export interface AgentToolCall {
-  tool: AgentToolName;
-  payload: RefactorPatch | { reason: string };
-}
+/**
+ * A proper discriminated union on `tool` — this matters, not just style:
+ * without it, TypeScript can't narrow `payload`'s type after checking
+ * `tool`, even though toolSchemas.ts's Zod schema (which this mirrors)
+ * enforces exactly this relationship at runtime. index.ts's orchestrator
+ * needs the narrowing to safely access `payload.newSourceText` only once
+ * `tool === "propose_patch"` is confirmed.
+ */
+export type AgentToolCall =
+  | { tool: "propose_patch"; payload: RefactorPatch }
+  | { tool: "request_more_context"; payload: { reason: string } }
+  | { tool: "abort_task"; payload: { reason: string } };
 
 export interface ReflectionAttempt {
   attemptNumber: number;

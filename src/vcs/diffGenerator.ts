@@ -15,6 +15,7 @@ export interface TaskSummaryEntry {
   taskId: string;
   filePath: string;
   passed: boolean;
+  note?: string; // why a task failed or was skipped, when known
 }
 
 export interface DiffReportOptions {
@@ -37,7 +38,7 @@ export function formatDiffReport(opts: DiffReportOptions): string {
   const passedCount = opts.tasksSummary.filter((t) => t.passed).length;
   lines.push(`## Tasks — ${passedCount}/${opts.tasksSummary.length} verified`);
   for (const t of opts.tasksSummary) {
-    lines.push(`- ${t.passed ? "✅" : "❌"} \`${t.taskId}\` — ${t.filePath}`);
+    lines.push(`- ${t.passed ? "✅" : "❌"} \`${t.taskId}\` — ${t.filePath}${t.note ? ` (${t.note})` : ""}`);
   }
 
   if (opts.tokenSavings) {

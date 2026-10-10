@@ -1,9 +1,14 @@
 #!/usr/bin/env tsx
 /**
- * Executable CLI entrypoint for AutoRefactor AI.
- * Wires Commander.js commands defined in src/cli/commands.ts.
+ * CLI entrypoint. Usage:
+ *   npm run cli -- analyze <target>
+ *   npm run cli -- run <target> [--no-git] [--run-tests] [--max-retries n] [--min-score n]
  *
- * Status: skeleton — implementation pending.
+ * dotenv is loaded BEFORE the commands module is imported, on purpose:
+ * agent/llmClient.ts reads LLM_PROVIDER when it first loads, so the .env
+ * file has to be in process.env by then.
  */
+import "dotenv/config";
 
-console.log("AutoRefactor AI — CLI skeleton. Commands not yet wired up.");
+const { buildProgram } = await import("../src/cli/commands.js");
+await buildProgram().parseAsync(process.argv);

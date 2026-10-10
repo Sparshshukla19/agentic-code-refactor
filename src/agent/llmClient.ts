@@ -1,29 +1,5 @@
 /**
- * LLM client configuration, provider-agnostic. Supports Anthropic (Claude),
- * OpenAI (GPT), and Google (Gemini) — the Vercel AI SDK gives every
- * provider the same generateObject() interface, so swapping providers is
- * a config change, not a rewrite. Two token/cost-optimization techniques
- * are wired in regardless of provider:
- *
- * 1. Model routing — a function only gets routed to the CAPABLE (pricier)
- *    tier when it actually needs the extra reasoning: deep branching/
- *    nested callbacks, or more than one distinct issue at once. Everything
- *    else — the common case — goes to the CHEAP tier.
- * 2. Prompt caching — ANTHROPIC ONLY. Anthropic requires explicit
- *    cache_control markers to cache a prompt prefix; OpenAI and Google
- *    cache automatically server-side with no markers needed, so this SDK
- *    call only attaches cacheControl when the active provider is
- *    Anthropic. Attaching it for the other providers would do nothing
- *    (they'd just ignore an option meant for a different provider) but
- *    it's cleaner not to claim a behavior that isn't actually happening.
- *
- * MODEL NAMES: Anthropic's two tiers default to real, verified model IDs.
- * OpenAI and Google's do NOT have defaults — model naming across both
- * providers changes too often, and recent web search on this came back
- * with visibly unreliable/contradictory results, so guessing a "current"
- * name here would risk silently shipping a wrong or nonexistent model ID.
- * Set LLM_MODEL_CHEAP / LLM_MODEL_CAPABLE yourself for those providers —
- * check the provider's own current model list, not this comment.
+ * LLM client configuration, provider-agnostic (Anthropic/OpenAI/Google).
  */
 import { anthropic } from "@ai-sdk/anthropic";
 import { openai } from "@ai-sdk/openai";
@@ -49,9 +25,7 @@ function resolveModelId(tier: ModelTier): string {
   const envVar = tier === "cheap" ? "LLM_MODEL_CHEAP" : "LLM_MODEL_CAPABLE";
   const fromEnv = process.env[envVar];
   if (fromEnv) return fromEnv;
-
   if (PROVIDER === "anthropic") return ANTHROPIC_DEFAULTS[tier];
-
   throw new Error(
     `${envVar} is not set. There is no default model ID for provider "${PROVIDER}" — ` +
       `model naming changes too often to guess reliably. Check ${PROVIDER}'s current model ` +
@@ -84,10 +58,67 @@ function requiredApiKeyEnvVar(): string {
   }
 }
 
-// A node needs the CAPABLE tier if it's flagged as structurally complex on
-// its own (high-complexity or callback-hell), OR if it has enough distinct
-// issues at once that juggling them correctly benefits from stronger
-// reasoning — even if no single issue is individually hard.
+/**
+ * Checks the LLM configuration WITHOUT making a call, returning a
+ * human-readable problem or undefined if everything needed is present. The
+ * CLI runs this first so a missing key is reported before any git branch is
+ * created or file touched, rather than failing on the first task.
+ */
+export function getLlmConfigProblem(): string | undefined {
+  const validProviders: string[] = ["anthropic", "openai", "google"];
+  if (!validProviders.includes(PROVIDER)) {
+    return `LLM_PROVIDER must be one of ${validProviders.join(", ")} (got "${PROVIDER}").`;
+  }
+  const keyVar = requiredApiKeyEnvVar();
+  if (!process.env[keyVar]) {
+    return `${keyVar} is not set (LLM_PROVIDER="${PROVIDER}"). Add it to your .env file — see .env.example.`;
+  }
+  if (PROVIDER !== "anthropic") {
+    for (const modelVar of ["LLM_MODEL_CHEAP", "LLM_MODEL_CAPABLE"]) {
+      if (!process.env[modelVar]) {
+        return `${modelVar} is not set. ${PROVIDER} has no built-in default model — set it in your .env file.`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * How many times the SDK retries a failed API call (with exponential
+ * backoff) before giving up. The SDK's own default is 2, which is too few
+ * for a free tier: this pipeline calls the model every few seconds, which
+ * is faster than free-tier per-minute quotas allow, so rate-limit (429)
+ * errors are expected and must be waited out, not treated as task failures.
+ * A blank or invalid LLM_API_RETRIES falls back to the default of 5.
+ */
+function apiRetries(): number {
+  const raw = process.env.LLM_API_RETRIES;
+  if (!raw) return 5;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : 5;
+}
+
+/** Human-readable "provider/model" for a tier, for progress output. Never throws. */
+export function describeModel(tier: ModelTier): string {
+  try {
+    return `${PROVIDER}/${resolveModelId(tier)}`;
+  } catch {
+    return PROVIDER;
+  }
+}
+
+/**
+ * Upper bound on ONE call, including all SDK retries/backoff. Without it, a
+ * rate-limited free tier can leave the pipeline waiting silently for a very
+ * long time. Blank or invalid LLM_TIMEOUT_MS falls back to 180 seconds.
+ */
+function timeoutMs(): number {
+  const raw = process.env.LLM_TIMEOUT_MS;
+  if (!raw) return 180_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 180_000;
+}
+
 const MULTI_ISSUE_THRESHOLD = 2;
 
 export function pickModelTier(node: Pick<ParsedNode, "complexity" | "smells">): ModelTier {
@@ -96,18 +127,11 @@ export function pickModelTier(node: Pick<ParsedNode, "complexity" | "smells">): 
   return needsDeepReasoning || isMultiIssue ? "capable" : "cheap";
 }
 
-/** One extra turn in a retried conversation — see reactLoop.buildRetryTurns(). */
 export interface ConversationTurn {
   role: "assistant" | "user";
   content: string;
 }
 
-/**
- * Calls the configured LLM provider with the objective for one refactor
- * task and returns a schema-validated AgentToolCall. `priorTurns` lets a
- * retry CONTINUE the same conversation (the previous patch + what broke)
- * instead of rebuilding the prompt from scratch — see reactLoop.ts.
- */
 export async function generateRefactorPatch(
   objective: RefactorObjective,
   tier: ModelTier,
@@ -128,11 +152,24 @@ export async function generateRefactorPatch(
       ? { role: "user" as const, content: buildUserMessage(objective), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } }
       : { role: "user" as const, content: buildUserMessage(objective) };
 
-  const { object } = await generateObject({
-    model: getModel(tier),
-    schema: AgentToolCallSchema,
-    messages: [systemMessage, userMessage, ...priorTurns],
-  });
-
-  return object;
+  const limitMs = timeoutMs();
+  try {
+    const { object } = await generateObject({
+      model: getModel(tier),
+      schema: AgentToolCallSchema,
+      maxRetries: apiRetries(),
+      abortSignal: AbortSignal.timeout(limitMs),
+      messages: [systemMessage, userMessage, ...priorTurns],
+    });
+    return object;
+  } catch (err) {
+    const name = (err as { name?: string }).name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new Error(
+        `The ${describeModel(tier)} call timed out after ${Math.round(limitMs / 1000)}s. On a free tier this is usually ` +
+          `rate limiting — wait a minute and retry, or raise LLM_TIMEOUT_MS in your .env file.`,
+      );
+    }
+    throw err;
+  }
 }

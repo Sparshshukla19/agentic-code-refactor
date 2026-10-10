@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { runTests } from "../src/sandbox/testRunner.js";
 
 const mathUtilsPath = path.resolve("test-target/src/mathUtils.js");
@@ -13,7 +14,7 @@ describe("runTests", () => {
 
   it("reports success for the real, currently-passing test suite", async () => {
     const result = await runTests({ cwd: path.resolve("test-target") });
-    expect(result.passed).toBe(true);
+    expect(result.passed, result.rawOutput).toBe(true);
     expect(result.failures).toEqual([]);
   }, 20000);
 
@@ -26,7 +27,7 @@ describe("runTests", () => {
 
     const result = await runTests({ cwd: path.resolve("test-target") });
     expect(result.passed).toBe(false);
-    expect(result.failures?.length).toBeGreaterThan(0);
+    expect(result.failures?.length, result.rawOutput).toBeGreaterThan(0);
     expect(result.failures?.[0].testName).toContain("computes average");
     expect(result.failures?.[0].errorMessage).toContain("toBeCloseTo");
   }, 20000);
@@ -36,4 +37,15 @@ describe("runTests", () => {
     expect(result.passed).toBe(false);
     expect(result.exitCode).toBe(-1);
   }, 10000);
+
+  it("returns a clear message, not a crash, when Jest isn't installed in the target", async () => {
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "no-jest-"));
+    try {
+      const result = await runTests({ cwd: emptyDir });
+      expect(result.passed).toBe(false);
+      expect(result.rawOutput).toContain("Jest not found");
+    } finally {
+      fs.rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
 });

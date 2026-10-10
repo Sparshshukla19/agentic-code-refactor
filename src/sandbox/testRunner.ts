@@ -8,6 +8,8 @@
  * using Vitest, Mocha, etc. would need a different parser for that tool's
  * own JSON output format, which isn't built here given the time budget.
  */
+import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { runCommand } from "./processRunner.js";
 import type { StageResult, TestFailure } from "../types/verification.types.js";
@@ -35,13 +37,40 @@ export interface RunTestsOptions {
   timeoutMs?: number;
 }
 
+/** Finds the target project's own Jest entry script, or undefined if Jest isn't installed. */
+function resolveJestBin(cwd: string): string | undefined {
+  try {
+    const require = createRequire(path.join(cwd, "package.json"));
+    const pkgPath = require.resolve("jest/package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.jest;
+    return bin ? path.join(path.dirname(pkgPath), bin) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runTests(options: RunTestsOptions): Promise<StageResult> {
-  const args = ["jest", "--json"];
+  const jestBin = resolveJestBin(options.cwd);
+  if (!jestBin) {
+    return {
+      stage: "test",
+      passed: false,
+      exitCode: -1,
+      rawOutput: `Jest not found from ${options.cwd}. Run \`npm install\` in the target project first.`,
+      failures: [],
+    };
+  }
+
+  const args = [jestBin, "--json"];
   if (options.testPathPattern) {
     args.push("--testPathPattern", options.testPathPattern);
   }
 
-  const result = await runCommand("npx", args, { cwd: options.cwd, timeoutMs: options.timeoutMs ?? 30_000 });
+  // Runs Jest's own script with the current Node binary, rather than via
+  // `npx`: on Windows npx is an npx.cmd shim that can't be spawned without
+  // a shell, and a shell mangles arguments and changes exit-code semantics.
+  const result = await runCommand(process.execPath, args, { cwd: options.cwd, timeoutMs: options.timeoutMs ?? 30_000 });
 
   if (result.timedOut) {
     return {

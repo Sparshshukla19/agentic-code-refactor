@@ -75,4 +75,12 @@ describe("formatDiffReport", () => {
     const report = formatDiffReport({ branchName: "b", baseBranch: "main", diff: "   ", tasksSummary: [] });
     expect(report).toContain("(no changes)");
   });
+
+  it("shows a failed task's note next to it", () => {
+    const report = formatDiffReport({
+      branchName: "b", baseBranch: "main", diff: "",
+      tasksSummary: [{ taskId: "task-0", filePath: "a.js", passed: false, note: "verification failed after 3 attempt(s)" }],
+    });
+    expect(report).toContain("verification failed after 3 attempt(s)");
+  });
 });
