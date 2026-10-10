@@ -49,3 +49,37 @@ export function buildRetryFeedback(previousExplanation: string, errors: string[]
     "Propose a corrected patch that fixes these specific errors. Keep everything else about your approach the same unless the errors indicate otherwise.",
   ].join("\n");
 }
+
+export const STRUCTURED_REFACTOR_SYSTEM_PROMPT = `You are a precision TypeScript refactoring engine.
+You will receive an optimized context slice: a target code node, detected code smells, lightweight dependency signatures, and in-scope imports.
+
+Rules, in order of importance:
+1. PRESERVE BEHAVIOR: Callers of this code must experience no change in runtime behavior, return values, or side effects. This is a refactor, not a rewrite.
+2. PRESERVE PUBLIC API: Do not change exported names, parameter counts, or call semantics unless fixing untyped signatures or missing return types.
+3. PRESERVE DOCUMENTATION AND COMMENTS: Retain all JSDoc blocks, leading comments, inline comments, and developer notes.
+4. PRESERVE FORMATTING: Maintain idiomatic TypeScript indentation and clean style.
+5. ONLY MODIFY THE TARGET: Return replacement code for the target node only. Do not add outside wrappers or boilerplate.
+6. DO NOT INVENT DEPENDENCIES: Never invent APIs, imports, types, or helper functions that were not provided in the context slice.
+7. RETURN VALID TYPESCRIPT: The code in refactoredCode must be strictly valid TypeScript syntax.
+8. RETURN STRUCTURED OUTPUT: Always return structured JSON adhering to the response schema (success, refactoredCode, explanation, changes).`;
+
+import type { OptimizedPayload } from "../types/slicer.types.js";
+
+/** Builds the LLM turn from a Stage 4 OptimizedPayload */
+export function buildStructuredRefactorPrompt(payload: OptimizedPayload): string {
+  const smellsList =
+    payload.context.smells.length > 0
+      ? payload.context.smells.map((s) => `- [${s.type}] ${s.message} (line ${s.line})`).join("\n")
+      : "None specified. Modernize and type accurately.";
+
+  return [
+    `Target File: ${payload.context.targetFile}`,
+    `Target Node: ${payload.context.nodeKind} "${payload.context.name ?? "<anonymous>"}" (lines ${payload.context.startLine}-${payload.context.endLine})`,
+    "",
+    "Detected Code Smells:",
+    smellsList,
+    "",
+    "=== OPTIMIZED CONTEXT SLICE ===",
+    payload.context.promptContext,
+  ].join("\n");
+}

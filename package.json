@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
     "cli": "tsx bin/autorefactor.ts",
+    "dev": "tsx bin/autorefactor.ts",
     "dev:server": "tsx src/server/app.ts",
     "test": "vitest run",
     "test:watch": "vitest",

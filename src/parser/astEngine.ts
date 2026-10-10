@@ -1,6 +1,8 @@
 /**
  * ts-morph wrapper: loads source files into a Project, walks their AST,
  * extracts declarations as ParsedNode records, and flags code smells.
+ *
+ * Stage 2: Static Code Parser & AST Builder.
  */
 import {
   Project,
@@ -12,9 +14,33 @@ import {
   InterfaceDeclaration,
   TypeAliasDeclaration,
   VariableStatement,
+  ArrowFunction,
+  FunctionExpression,
   Node,
 } from "ts-morph";
-import type { CodeSmell, CodeSmellType, FileParseResult, NodeKind, ParsedNode } from "../types/ast.types.js";
+import type {
+  AstEngineOptions,
+  CodeSmell,
+  CodeSmellType,
+  ExportInfo,
+  FileParseResult,
+  ImportInfo,
+  NodeKind,
+  ParsedNode,
+} from "../types/ast.types.js";
+import type { WorkspaceResult } from "../types/workspace.types.js";
+import { extractTrivia } from "./triviaPreserver.js";
+
+export type {
+  AstEngineOptions,
+  CodeSmell,
+  CodeSmellType,
+  ExportInfo,
+  FileParseResult,
+  ImportInfo,
+  NodeKind,
+  ParsedNode,
+};
 
 /**
  * Creates a ts-morph Project rooted at the given tsconfig, or an
@@ -34,37 +60,98 @@ export function loadSourceFiles(project: Project, filePaths: string[]): SourceFi
   return filePaths.map((p) => project.addSourceFileAtPath(p));
 }
 
+/**
+ * Stage 2 entrypoint: Analyzes an ingested workspace (from Stage 1) and returns AST analysis results.
+ *
+ * @param workspaceResult Ingested workspace from Stage 1 (workspace.ts)
+ * @param options Configurable AST analysis thresholds
+ * @returns Array of FileParseResult records ready for Stage 3 dependency graph
+ */
+export function analyzeWorkspace(
+  workspaceResult: WorkspaceResult,
+  options?: AstEngineOptions,
+): FileParseResult[] {
+  const results: FileParseResult[] = [];
+
+  for (const file of workspaceResult.files) {
+    let sourceFile = workspaceResult.project.getSourceFile(file.absolutePath);
+    if (!sourceFile) {
+      sourceFile = workspaceResult.project.createSourceFile(
+        file.absolutePath,
+        file.sourceText,
+        { overwrite: true },
+      );
+    }
+
+    results.push(parseSourceFile(sourceFile, options));
+  }
+
+  return results;
+}
+
 /** Parses a single already-loaded SourceFile into a FileParseResult. */
-export function parseSourceFile(sourceFile: SourceFile): FileParseResult {
+export function parseSourceFile(
+  sourceFile: SourceFile,
+  options?: AstEngineOptions,
+): FileParseResult {
   const filePath = sourceFile.getFilePath();
   const language: "js" | "ts" = filePath.endsWith(".ts") || filePath.endsWith(".tsx") ? "ts" : "js";
 
   const nodes: ParsedNode[] = [];
 
-  sourceFile.getFunctions().forEach((fn) => nodes.push(toParsedNode(fn, "function", filePath)));
+  sourceFile.getFunctions().forEach((fn) => nodes.push(toParsedNode(fn, "function", filePath, options)));
   sourceFile.getClasses().forEach((cls) => {
-    nodes.push(toParsedNode(cls, "class", filePath));
-    cls.getMethods().forEach((m) => nodes.push(toParsedNode(m, "method", filePath)));
+    nodes.push(toParsedNode(cls, "class", filePath, options));
+    cls.getMethods().forEach((m) => nodes.push(toParsedNode(m, "method", filePath, options)));
   });
-  sourceFile.getInterfaces().forEach((i) => nodes.push(toParsedNode(i, "interface", filePath)));
-  sourceFile.getTypeAliases().forEach((t) => nodes.push(toParsedNode(t, "type-alias", filePath)));
-  sourceFile.getVariableStatements().forEach((v) => nodes.push(toParsedNode(v, "variable", filePath)));
+  sourceFile.getInterfaces().forEach((i) => nodes.push(toParsedNode(i, "interface", filePath, options)));
+  sourceFile.getTypeAliases().forEach((t) => nodes.push(toParsedNode(t, "type-alias", filePath, options)));
+
+  sourceFile.getVariableStatements().forEach((v) => {
+    let hasFunctionInit = false;
+    for (const decl of v.getDeclarations()) {
+      const init = decl.getInitializer();
+      if (init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init))) {
+        hasFunctionInit = true;
+        nodes.push(toParsedNode(init, "function", filePath, options));
+      }
+    }
+    if (!hasFunctionInit || (v.getDeclarationKind() as string) === "var" || hasAnyUsage(v)) {
+      nodes.push(toParsedNode(v, "variable", filePath, options));
+    }
+  });
+
+  const importsResult = extractImports(sourceFile);
+  const exportsResult = extractExports(sourceFile);
+  const fullText = sourceFile.getFullText();
+
+  // Aggregate file-level smells
+  const allSmells: CodeSmell[] = [];
+  nodes.forEach((n) => allSmells.push(...n.smells));
 
   return {
     filePath,
     language,
     nodes,
-    imports: getImportSpecifiers(sourceFile),
-    exports: getExportNames(sourceFile),
-    fullText: sourceFile.getFullText(),
+    imports: importsResult.specifiers,
+    exports: exportsResult.names,
+    fullText,
+    sourceText: fullText,
+    smells: allSmells,
+    importDeclarations: importsResult.declarations,
+    exportDeclarations: exportsResult.declarations,
   };
 }
 
 /** Convenience: load + parse a batch of files in one call. */
-export function parseFiles(filePaths: string[], tsConfigFilePath?: string): FileParseResult[] {
+export function parseFiles(
+  filePaths: string[],
+  tsConfigFilePath?: string,
+  options?: AstEngineOptions,
+): FileParseResult[] {
   const project = createProject(tsConfigFilePath);
   const sourceFiles = loadSourceFiles(project, filePaths);
-  return sourceFiles.map(parseSourceFile);
+  return sourceFiles.map((sf) => parseSourceFile(sf, options));
 }
 
 // ---- internals -------------------------------------------------------
@@ -75,9 +162,16 @@ type SmellableNode =
   | MethodDeclaration
   | InterfaceDeclaration
   | TypeAliasDeclaration
-  | VariableStatement;
+  | VariableStatement
+  | ArrowFunction
+  | FunctionExpression;
 
-function toParsedNode(node: SmellableNode, kind: NodeKind, filePath: string): ParsedNode {
+function toParsedNode(
+  node: SmellableNode,
+  kind: NodeKind,
+  filePath: string,
+  options?: AstEngineOptions,
+): ParsedNode {
   const name = getNodeName(node, kind);
   const complexity = computeCyclomaticComplexity(node, kind);
   return {
@@ -89,7 +183,8 @@ function toParsedNode(node: SmellableNode, kind: NodeKind, filePath: string): Pa
     endLine: node.getEndLineNumber(),
     sourceText: node.getText(),
     complexity,
-    smells: detectSmells(node, complexity),
+    smells: detectSmells(node, complexity, filePath, options),
+    trivia: extractTrivia(node),
   };
 }
 
@@ -98,36 +193,117 @@ function getNodeName(node: SmellableNode, kind: NodeKind): string {
     const decls = (node as VariableStatement).getDeclarations();
     return decls.map((d) => d.getName()).join(", ") || "<anonymous>";
   }
-  const named = node as FunctionDeclaration | ClassDeclaration | MethodDeclaration | InterfaceDeclaration | TypeAliasDeclaration;
-  return named.getName?.() ?? "<anonymous>";
+  const named = node as
+    | FunctionDeclaration
+    | ClassDeclaration
+    | MethodDeclaration
+    | InterfaceDeclaration
+    | TypeAliasDeclaration;
+  if ("getName" in named && typeof named.getName === "function") {
+    const name = named.getName();
+    if (name) return name;
+  }
+  const parent = node.getParent();
+  if (parent && Node.isVariableDeclaration(parent)) {
+    return parent.getName();
+  }
+  return "<anonymous>";
 }
 
-function getImportSpecifiers(sourceFile: SourceFile): string[] {
-  const esmImports = sourceFile.getImportDeclarations().map((d) => d.getModuleSpecifierValue());
-  // CommonJS: require("...") calls — needed since test-target/ is plain JS.
-  const cjsImports: string[] = [];
+/**
+ * Extracts ESM and CommonJS imports as both specifier strings and structured metadata.
+ */
+export function extractImports(sourceFile: SourceFile): {
+  specifiers: string[];
+  declarations: ImportInfo[];
+} {
+  const specifiers: string[] = [];
+  const declarations: ImportInfo[] = [];
+
+  for (const imp of sourceFile.getImportDeclarations()) {
+    const specifier = imp.getModuleSpecifierValue();
+    specifiers.push(specifier);
+
+    const defaultImport = imp.getDefaultImport()?.getText();
+    const namedImports = imp.getNamedImports().map((n) => n.getName());
+    const namespaceImport = imp.getNamespaceImport()?.getText();
+    const line = imp.getStartLineNumber();
+    const column = sourceFile.getLineAndColumnAtPos(imp.getStart()).column;
+
+    declarations.push({
+      moduleSpecifier: specifier,
+      defaultImport,
+      namedImports,
+      namespaceImport,
+      isRequire: false,
+      line,
+      column,
+    });
+  }
+
   sourceFile.forEachDescendant((node) => {
     if (Node.isCallExpression(node) && node.getExpression().getText() === "require") {
       const arg = node.getArguments()[0];
-      if (arg && Node.isStringLiteral(arg)) cjsImports.push(arg.getLiteralValue());
+      if (arg && Node.isStringLiteral(arg)) {
+        const specifier = arg.getLiteralValue();
+        specifiers.push(specifier);
+        declarations.push({
+          moduleSpecifier: specifier,
+          namedImports: [],
+          isRequire: true,
+          line: node.getStartLineNumber(),
+          column: sourceFile.getLineAndColumnAtPos(node.getStart()).column,
+        });
+      }
     }
   });
-  return [...esmImports, ...cjsImports];
+
+  return { specifiers, declarations };
 }
 
-function getExportNames(sourceFile: SourceFile): string[] {
+/**
+ * Extracts ESM and CommonJS exports as both names and structured metadata.
+ */
+export function extractExports(sourceFile: SourceFile): {
+  names: string[];
+  declarations: ExportInfo[];
+} {
   const filePath = sourceFile.getFilePath();
   const isTypeScript = filePath.endsWith(".ts") || filePath.endsWith(".tsx");
 
-  // ts-morph's getExportedDeclarations() resolves ESM `export` statements
-  // reliably. For CommonJS `.js` files it depends on the checker's
-  // usage-driven symbol resolution (unreliable with checkJs: false — a file
-  // nothing else requires can resolve to zero exports even with a clear
-  // `module.exports = {...}`), so CJS gets its own explicit scan instead.
+  const names: string[] = [];
+  const declarations: ExportInfo[] = [];
+
   if (isTypeScript) {
-    return Array.from(sourceFile.getExportedDeclarations().keys());
+    const exportedMap = sourceFile.getExportedDeclarations();
+    for (const [name, decls] of exportedMap.entries()) {
+      names.push(name);
+      const firstDecl = decls[0];
+      const line = firstDecl ? firstDecl.getStartLineNumber() : 1;
+      const column = firstDecl
+        ? sourceFile.getLineAndColumnAtPos(firstDecl.getStart()).column
+        : 1;
+      declarations.push({
+        name,
+        isDefault: name === "default",
+        line,
+        column,
+      });
+    }
+  } else {
+    const cjsNames = getCommonJsExportNames(sourceFile);
+    names.push(...cjsNames);
+    for (const name of cjsNames) {
+      declarations.push({
+        name,
+        isDefault: false,
+        line: 1,
+        column: 1,
+      });
+    }
   }
-  return getCommonJsExportNames(sourceFile);
+
+  return { names, declarations };
 }
 
 function getCommonJsExportNames(sourceFile: SourceFile): string[] {
@@ -138,7 +314,6 @@ function getCommonJsExportNames(sourceFile: SourceFile): string[] {
     const leftText = node.getLeft().getText();
     const right = node.getRight();
 
-    // module.exports = { a, b, c }  /  exports.foo = ... (single named export)
     if (leftText === "module.exports" && Node.isObjectLiteralExpression(right)) {
       right
         .asKindOrThrow(SyntaxKind.ObjectLiteralExpression)
@@ -156,30 +331,13 @@ function getCommonJsExportNames(sourceFile: SourceFile): string[] {
   return Array.from(names);
 }
 
-// McCabe's own widely-cited guidance: complexity above ~10 is where a
-// function starts becoming hard to reason about and test exhaustively —
-// this is the threshold that turns a raw number into a "should be
-// refactored" signal.
-const COMPLEXITY_THRESHOLD = 10;
+const DEFAULT_COMPLEXITY_THRESHOLD = 10;
+const DEFAULT_LONG_FUNCTION_THRESHOLD = 50;
+const DEFAULT_DEEP_NESTING_THRESHOLD = 4;
+const DEFAULT_CALLBACK_HELL_THRESHOLD = 2;
 
-/**
- * Cyclomatic complexity: start at 1 (one baseline path through the code),
- * and add 1 for every point where execution can branch — an `if`, a loop,
- * a `catch`, a `case`, a ternary, or a short-circuit `&&`/`||`. This is the
- * standard McCabe formula.
- *
- * One deliberate departure from the textbook version: this walks INTO
- * nested function/callback bodies too, rather than stopping at the
- * function boundary. Normally each nested function would get its own
- * separate complexity score — but astEngine only extracts NAMED
- * declarations as their own nodes (see parseSourceFile), so an anonymous
- * callback passed as an argument is never tracked as its own refactor
- * target. Its branching is real complexity the outer function carries, so
- * folding it in here is what makes "callback hell" actually score as
- * complex rather than invisible.
- */
 function computeCyclomaticComplexity(node: SmellableNode, kind: NodeKind): number {
-  if (kind !== "function" && kind !== "method") return 1; // no branching concept for these kinds
+  if (kind !== "function" && kind !== "method") return 1;
 
   let complexity = 1;
   node.forEachDescendant((n) => {
@@ -191,7 +349,7 @@ function computeCyclomaticComplexity(node: SmellableNode, kind: NodeKind): numbe
       Node.isWhileStatement(n) ||
       Node.isDoStatement(n) ||
       Node.isCatchClause(n) ||
-      Node.isConditionalExpression(n) || // ternary
+      Node.isConditionalExpression(n) ||
       Node.isCaseClause(n)
     ) {
       complexity++;
@@ -205,38 +363,243 @@ function computeCyclomaticComplexity(node: SmellableNode, kind: NodeKind): numbe
   return complexity;
 }
 
-function detectSmells(node: SmellableNode, complexity: number): CodeSmell[] {
+function detectSmells(
+  node: SmellableNode,
+  complexity: number,
+  filePath: string,
+  options?: AstEngineOptions,
+): CodeSmell[] {
   const smells: CodeSmell[] = [];
-  const line = node.getStartLineNumber();
 
-  pushIf(smells, hasUntypedSignature(node), "untyped-signature", "Parameters or return type are untyped", line);
-  pushIf(smells, hasCallbackHell(node), "callback-hell", "Nested callback parameters exceed depth threshold", line);
-  pushIf(smells, hasVarUsage(node), "var-usage", "Uses `var` instead of `let`/`const`", line);
-  pushIf(smells, hasNoErrorHandling(node), "no-error-handling", "Async/callback logic with no visible error handling", line);
-  pushIf(
-    smells,
-    complexity > COMPLEXITY_THRESHOLD,
-    "high-complexity",
-    `Cyclomatic complexity is ${complexity} (McCabe threshold: ${COMPLEXITY_THRESHOLD})`,
-    line,
-  );
+  const pushSmell = (
+    condition: boolean,
+    type: CodeSmellType,
+    message: string,
+    targetNode?: Node,
+  ) => {
+    if (!condition) return;
+    const target = targetNode ?? node;
+    const targetSf = target.getSourceFile();
+    const line = target.getStartLineNumber();
+    const column = targetSf.getLineAndColumnAtPos(target.getStart()).column;
+    const start = target.getStart();
+    const end = target.getEnd();
+    const code = target.getText();
+
+    smells.push({
+      type,
+      message,
+      line,
+      column,
+      start,
+      end,
+      code,
+      filePath,
+    });
+  };
+
+  // 1. var-usage
+  if (hasVarUsage(node)) {
+    const varDecl = findVarDeclaration(node);
+    pushSmell(true, "var-usage", "Uses `var` instead of `let`/`const`", varDecl);
+  }
+
+  // 2. untyped-signature (untyped parameters)
+  if (hasUntypedSignature(node)) {
+    pushSmell(true, "untyped-signature", "Parameters or return type are untyped", node);
+  }
+
+  // 3. missing-return-type
+  if (hasMissingReturnType(node)) {
+    pushSmell(true, "missing-return-type", "Function is missing an explicit return type annotation", node);
+  }
+
+  // 4. any-usage
+  if (hasAnyUsage(node)) {
+    const anyNode = findAnyKeyword(node);
+    pushSmell(true, "any-usage", "Explicit usage of `any` type detected", anyNode);
+  }
+
+  // 5. long-function
+  const longFnThreshold = options?.longFunctionThreshold ?? DEFAULT_LONG_FUNCTION_THRESHOLD;
+  if (isLongFunction(node, longFnThreshold)) {
+    const lines = node.getEndLineNumber() - node.getStartLineNumber() + 1;
+    pushSmell(
+      true,
+      "long-function",
+      `Function exceeds maximum length (${lines} lines; threshold: ${longFnThreshold})`,
+      node,
+    );
+  }
+
+  // 6. deep-nesting
+  const nestingThreshold = options?.deepNestingThreshold ?? DEFAULT_DEEP_NESTING_THRESHOLD;
+  if (hasDeepNesting(node, nestingThreshold)) {
+    const depth = computeNestingDepth(node);
+    pushSmell(
+      true,
+      "deep-nesting",
+      `Block nesting depth of ${depth} reaches or exceeds threshold of ${nestingThreshold}`,
+      node,
+    );
+  }
+
+  // 7. callback-hell
+  const callbackThreshold = options?.callbackHellThreshold ?? DEFAULT_CALLBACK_HELL_THRESHOLD;
+  if (hasCallbackHell(node, callbackThreshold)) {
+    pushSmell(true, "callback-hell", "Nested callback parameters exceed depth threshold", node);
+  }
+
+  // 8. no-error-handling
+  if (hasNoErrorHandling(node)) {
+    pushSmell(true, "no-error-handling", "Async/callback logic with no visible error handling", node);
+  }
+
+  // 9. high-complexity
+  const compThreshold = options?.complexityThreshold ?? DEFAULT_COMPLEXITY_THRESHOLD;
+  if (complexity > compThreshold) {
+    pushSmell(
+      true,
+      "high-complexity",
+      `Cyclomatic complexity is ${complexity} (McCabe threshold: ${compThreshold})`,
+      node,
+    );
+  }
 
   return smells;
 }
 
-function pushIf(smells: CodeSmell[], condition: boolean, type: CodeSmellType, message: string, line: number): void {
-  if (condition) smells.push({ type, message, line });
+function hasUntypedSignature(node: SmellableNode): boolean {
+  if (
+    !Node.isFunctionDeclaration(node) &&
+    !Node.isMethodDeclaration(node) &&
+    !Node.isArrowFunction(node) &&
+    !Node.isFunctionExpression(node)
+  ) {
+    return false;
+  }
+  const params = node.getParameters();
+  return params.length > 0 && params.some((p) => !p.getTypeNode());
 }
 
-function hasUntypedSignature(node: SmellableNode): boolean {
-  if (!Node.isFunctionDeclaration(node) && !Node.isMethodDeclaration(node)) return false;
-  const noReturnType = !node.getReturnTypeNode();
-  const anyUntypedParam = node.getParameters().some((p) => !p.getTypeNode());
-  return noReturnType || anyUntypedParam;
+function hasMissingReturnType(node: SmellableNode): boolean {
+  if (
+    !Node.isFunctionDeclaration(node) &&
+    !Node.isMethodDeclaration(node) &&
+    !Node.isArrowFunction(node) &&
+    !Node.isFunctionExpression(node)
+  ) {
+    return false;
+  }
+  if (Node.isConstructorDeclaration(node) || Node.isSetAccessorDeclaration(node)) {
+    return false;
+  }
+  return !node.getReturnTypeNode();
+}
+
+function hasAnyUsage(node: Node): boolean {
+  return node.getKind() === SyntaxKind.AnyKeyword || node.getDescendantsOfKind(SyntaxKind.AnyKeyword).length > 0;
+}
+
+function findAnyKeyword(node: Node): Node | undefined {
+  if (node.getKind() === SyntaxKind.AnyKeyword) return node;
+  return node.getDescendantsOfKind(SyntaxKind.AnyKeyword)[0];
+}
+
+function hasVarUsage(node: SmellableNode): boolean {
+  if (Node.isVariableStatement(node) && (node.getDeclarationKind() as string) === "var") {
+    return true;
+  }
+  let found = false;
+  node.forEachDescendant((n) => {
+    if (Node.isVariableDeclarationList(n) && ((n.getDeclarationKind() as string) === "var")) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+function findVarDeclaration(node: SmellableNode): Node | undefined {
+  if (Node.isVariableStatement(node) && ((node.getDeclarationKind() as string) === "var")) {
+    return node;
+  }
+  let target: Node | undefined;
+  node.forEachDescendant((n) => {
+    if (!target && Node.isVariableDeclarationList(n) && ((n.getDeclarationKind() as string) === "var")) {
+      target = n;
+    }
+  });
+  return target;
+}
+
+function isLongFunction(node: SmellableNode, threshold: number): boolean {
+  if (
+    !Node.isFunctionDeclaration(node) &&
+    !Node.isMethodDeclaration(node) &&
+    !Node.isArrowFunction(node) &&
+    !Node.isFunctionExpression(node)
+  ) {
+    return false;
+  }
+  const lines = node.getEndLineNumber() - node.getStartLineNumber() + 1;
+  return lines > threshold;
+}
+
+function computeNestingDepth(node: SmellableNode): number {
+  if (
+    !Node.isFunctionDeclaration(node) &&
+    !Node.isMethodDeclaration(node) &&
+    !Node.isArrowFunction(node) &&
+    !Node.isFunctionExpression(node)
+  ) {
+    return 0;
+  }
+
+  const body =
+    Node.isFunctionDeclaration(node) ||
+    Node.isMethodDeclaration(node) ||
+    Node.isFunctionExpression(node) ||
+    Node.isArrowFunction(node)
+      ? node.getBody()
+      : undefined;
+
+  if (!body) return 0;
+
+  let maxDepth = 0;
+  const walk = (n: Node, currentDepth: number) => {
+    maxDepth = Math.max(maxDepth, currentDepth);
+    const isNesting =
+      Node.isIfStatement(n) ||
+      Node.isForStatement(n) ||
+      Node.isForInStatement(n) ||
+      Node.isForOfStatement(n) ||
+      Node.isWhileStatement(n) ||
+      Node.isDoStatement(n) ||
+      Node.isSwitchStatement(n) ||
+      Node.isTryStatement(n) ||
+      Node.isCatchClause(n);
+
+    const nextDepth = isNesting ? currentDepth + 1 : currentDepth;
+    n.forEachChild((child) => walk(child, nextDepth));
+  };
+
+  walk(body, 0);
+  return maxDepth;
+}
+
+function hasDeepNesting(node: SmellableNode, threshold: number): boolean {
+  return computeNestingDepth(node) >= threshold;
 }
 
 function hasCallbackHell(node: SmellableNode, depthThreshold = 2): boolean {
-  if (!Node.isFunctionDeclaration(node) && !Node.isMethodDeclaration(node)) return false;
+  if (
+    !Node.isFunctionDeclaration(node) &&
+    !Node.isMethodDeclaration(node) &&
+    !Node.isArrowFunction(node) &&
+    !Node.isFunctionExpression(node)
+  ) {
+    return false;
+  }
   let maxDepth = 0;
   const walk = (n: Node, depth: number) => {
     maxDepth = Math.max(maxDepth, depth);
@@ -249,14 +612,6 @@ function hasCallbackHell(node: SmellableNode, depthThreshold = 2): boolean {
   };
   walk(node, 0);
   return maxDepth >= depthThreshold;
-}
-
-function hasVarUsage(node: SmellableNode): boolean {
-  let found = false;
-  node.forEachDescendant((n) => {
-    if (Node.isVariableDeclarationList(n) && n.getDeclarationKind() === "var" as any) found = true;
-  });
-  return found;
 }
 
 function hasNoErrorHandling(node: SmellableNode): boolean {

@@ -3,6 +3,13 @@
  * topologically-ordered execution queue derived from it.
  */
 
+export interface DependencyEdge {
+  from: string; // Importer file path
+  to: string; // Imported file path
+  importPath: string; // Raw import specifier
+  importType?: "named" | "default" | "namespace" | "require" | "side-effect";
+}
+
 export interface GraphNode {
   id: string; // file path, used as the graph node identity
   filePath: string;
@@ -10,11 +17,25 @@ export interface GraphNode {
   dependedOnBy: string[]; // file paths that import this file
 }
 
+export interface RefactoringQueue {
+  files: string[];
+  hasCycle: boolean;
+  cycle?: string[];
+}
+
 export interface DependencyGraph {
   nodes: Map<string, GraphNode>;
+  edges: DependencyEdge[];
   addNode(filePath: string): GraphNode;
-  addEdge(fromFilePath: string, toFilePath: string): void;
-  topologicalOrder(): string[]; // bottom-up: utilities before consumers
+  addEdge(
+    fromFilePath: string,
+    toFilePath: string,
+    importPath?: string,
+    importType?: DependencyEdge["importType"],
+  ): void;
+  topologicalOrder(): string[]; // bottom-up: utilities before consumers (throws on cycle)
+  hasCycle(): boolean;
+  detectCycle(): string[] | null;
 }
 
 export interface QueuedTask {
