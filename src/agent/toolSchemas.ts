@@ -43,3 +43,15 @@ export const AgentToolCallSchema = z.discriminatedUnion("tool", [
   RequestMoreContextCallSchema,
   AbortTaskCallSchema,
 ]);
+
+export const RefactoringChangeSchema = z.object({
+  type: z.string(),
+  description: z.string(),
+});
+
+export const LlmRefactorResponseSchema = z.object({
+  success: z.boolean(),
+  refactoredCode: z.string().min(1, "refactoredCode cannot be empty — the model must return complete refactored code"),
+  explanation: z.string(),
+  changes: z.array(RefactoringChangeSchema),
+});

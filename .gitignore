@@ -7,3 +7,5 @@ logs/
 coverage/
 test-target/node_modules/
 agent/agent-*.branch
+# Generated refactoring reports and output
+artifacts/

@@ -2,8 +2,8 @@
 /**
  * Executable CLI entrypoint for AutoRefactor AI.
  * Wires Commander.js commands defined in src/cli/commands.ts.
- *
- * Status: skeleton — implementation pending.
  */
+import { buildCli } from "../src/cli/commands.js";
 
-console.log("AutoRefactor AI — CLI skeleton. Commands not yet wired up.");
+const program = buildCli();
+program.parse(process.argv);

@@ -32,8 +32,15 @@ import { generateObject } from "ai";
 import type { LanguageModel } from "ai";
 import type { AgentToolCall, RefactorObjective } from "../types/agent.types.js";
 import type { ParsedNode } from "../types/ast.types.js";
-import { AgentToolCallSchema } from "./toolSchemas.js";
-import { SYSTEM_PROMPT, buildUserMessage } from "./prompts.js";
+import type { OptimizedPayload } from "../types/slicer.types.js";
+import type { LlmRefactorResponse } from "../types/refactor.types.js";
+import { AgentToolCallSchema, LlmRefactorResponseSchema } from "./toolSchemas.js";
+import {
+  SYSTEM_PROMPT,
+  buildUserMessage,
+  STRUCTURED_REFACTOR_SYSTEM_PROMPT,
+  buildStructuredRefactorPrompt,
+} from "./prompts.js";
 
 export type LlmProvider = "anthropic" | "openai" | "google";
 export type ModelTier = "cheap" | "capable";
@@ -136,3 +143,48 @@ export async function generateRefactorPatch(
 
   return object;
 }
+
+/**
+ * Calls the configured LLM provider with the Stage 4 OptimizedPayload
+ * and returns schema-enforced structured refactoring output.
+ */
+export async function generateStructuredRefactor(
+  payload: OptimizedPayload,
+  tier: ModelTier,
+  options?: { mockResponse?: LlmRefactorResponse },
+): Promise<LlmRefactorResponse> {
+  if (options?.mockResponse) {
+    return options.mockResponse;
+  }
+
+  const apiKeyVar = requiredApiKeyEnvVar();
+  if (!process.env[apiKeyVar]) {
+    throw new Error(`${apiKeyVar} is not set — required for LLM_PROVIDER="${PROVIDER}". See .env.example.`);
+  }
+
+  const systemMessage =
+    PROVIDER === "anthropic"
+      ? {
+          role: "system" as const,
+          content: STRUCTURED_REFACTOR_SYSTEM_PROMPT,
+          providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } },
+        }
+      : { role: "system" as const, content: STRUCTURED_REFACTOR_SYSTEM_PROMPT };
+
+  const userMessage =
+    PROVIDER === "anthropic"
+      ? {
+          role: "user" as const,
+          content: buildStructuredRefactorPrompt(payload),
+          providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } },
+        }
+      : { role: "user" as const, content: buildStructuredRefactorPrompt(payload) };
+
+  const { object } = await generateObject({
+    model: getModel(tier),
+    schema: LlmRefactorResponseSchema,
+    messages: [systemMessage, userMessage],
+  });
+
+  return object;
+}
