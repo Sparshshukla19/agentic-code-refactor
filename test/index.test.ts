@@ -230,5 +230,68 @@ describe("runPipeline — end to end (LLM call mocked, everything else real)", (
 
     expect(messages.some((m) => m.includes("Created branch"))).toBe(true);
     expect(messages.some((m) => m.includes("verified"))).toBe(true);
+    // Each LLM call announces itself and reports how long it took, so a slow
+    // or rate-limited call is visibly "waiting", not silent.
+    expect(messages.some((m) => m.includes("asking") && m.includes("for a patch"))).toBe(true);
+    expect(messages.some((m) => /got "propose_patch" after [\d.]+s/.test(m))).toBe(true);
+  });
+
+  it("shows the user why it is waiting when the LLM layer reports a retry", async () => {
+    vi.mocked(runRefactorTask).mockImplementation(async (_objective, _node, options) => {
+      options?.onRetry?.({ attempt: 1, maxRetries: 5, waitMs: 31_000, reason: "rate limited (429): quota" });
+      return {
+        tool: "propose_patch",
+        payload: { taskId: "t", targetNodeId: "n", newSourceText: "function add(a, b) {\n  return a + b; // p\n}", explanation: "x" },
+      };
+    });
+    const messages: string[] = [];
+
+    await runPipeline({ targetDir: tmpDir, filePaths: [filePath], minRefactorScore: 0, skipGit: true, onProgress: (m) => messages.push(m) });
+
+    expect(messages).toContain("   ⏳ rate limited (429): quota — waiting 31s (retry 1/5)");
+  });
+
+  it("totals the API's measured token usage across every call, retries included", async () => {
+    const patch = (text: string) => ({
+      tool: "propose_patch" as const,
+      payload: { taskId: "t", targetNodeId: "n", newSourceText: text, explanation: "x" },
+    });
+    vi.mocked(runRefactorTask)
+      .mockImplementationOnce(async (_o, _n, options) => {
+        options?.onUsage?.({ promptTokens: 400, completionTokens: 50 });
+        return patch("function add(a, b) {\n  return a + b + brokenRef;\n}"); // fails verification -> retry
+      })
+      .mockImplementationOnce(async (_o, _n, options) => {
+        options?.onUsage?.({ promptTokens: 700, completionTokens: 60 });
+        return patch("function add(a, b) {\n  return a + b; // ok\n}");
+      });
+    const messages: string[] = [];
+
+    const result = await runPipeline({ targetDir: tmpDir, filePaths: [filePath], minRefactorScore: 0, skipGit: true, onProgress: (m) => messages.push(m) });
+
+    expect(result.actualUsage).toEqual({ calls: 2, promptTokens: 1100, completionTokens: 110 });
+    expect(messages.some((m) => m.includes("400 in / 50 out tokens"))).toBe(true);
+    expect(messages.some((m) => m.includes("700 in / 60 out tokens"))).toBe(true);
+  });
+
+  it("reports zero usage, and no usage section in the report, when no call ran", async () => {
+    const result = await runPipeline({ targetDir: tmpDir, filePaths: [filePath] }); // default threshold: nothing scheduled
+    expect(result.actualUsage).toEqual({ calls: 0, promptTokens: 0, completionTokens: 0 });
+    expect(result.diffReport).not.toContain("Actual API Usage");
+  });
+
+  it("warns on the console when lint had to be skipped for a file type, instead of silently passing", async () => {
+    const tsFile = path.join(tmpDir, "typed.ts");
+    fs.writeFileSync(tsFile, "function add(a, b) {\n  return a + b;\n}\n");
+    vi.mocked(runRefactorTask).mockResolvedValue({
+      tool: "propose_patch",
+      payload: { taskId: "t", targetNodeId: "n", newSourceText: "function add(a: number, b: number): number {\n  return a + b;\n}", explanation: "x" },
+    });
+    const messages: string[] = [];
+
+    const result = await runPipeline({ targetDir: tmpDir, filePaths: [tsFile], minRefactorScore: 0, skipGit: true, onProgress: (m) => messages.push(m) });
+
+    expect(result.taskOutcomes[0].passed).toBe(true);
+    expect(messages.some((m) => m.includes("⚠") && m.includes("Lint skipped"))).toBe(true);
   });
 });

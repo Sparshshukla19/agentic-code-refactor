@@ -71,7 +71,10 @@ export async function applyPatch(project: Project, parsedNode: ParsedNode, newSo
     return { applied: false, reason: `Could not re-locate ${parsedNode.kind} "${parsedNode.name}" in ${parsedNode.filePath}` };
   }
 
-  const leadingJsDoc = getLeadingJsDocText(node);
+  // If the patch brings its own JSDoc block (e.g. newly added @param types),
+  // it replaces the old one; re-attaching the old as well would duplicate it.
+  const patchHasOwnJsDoc = /^\s*\/\*\*/.test(newSourceText);
+  const leadingJsDoc = patchHasOwnJsDoc ? "" : getLeadingJsDocText(node);
   const fullReplacement = leadingJsDoc ? `${leadingJsDoc}\n${newSourceText}` : newSourceText;
 
   node.replaceWithText(fullReplacement);

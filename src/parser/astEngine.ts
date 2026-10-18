@@ -16,10 +16,6 @@ import {
 } from "ts-morph";
 import type { CodeSmell, CodeSmellType, FileParseResult, NodeKind, ParsedNode } from "../types/ast.types.js";
 
-/**
- * Creates a ts-morph Project rooted at the given tsconfig, or an
- * in-memory project (useful for tests / plain JS targets without one).
- */
 export function createProject(tsConfigFilePath?: string): Project {
   return tsConfigFilePath
     ? new Project({ tsConfigFilePath })
@@ -29,12 +25,10 @@ export function createProject(tsConfigFilePath?: string): Project {
       });
 }
 
-/** Adds one or more file globs/paths to the project and returns the loaded SourceFiles. */
 export function loadSourceFiles(project: Project, filePaths: string[]): SourceFile[] {
   return filePaths.map((p) => project.addSourceFileAtPath(p));
 }
 
-/** Parses a single already-loaded SourceFile into a FileParseResult. */
 export function parseSourceFile(sourceFile: SourceFile): FileParseResult {
   const filePath = sourceFile.getFilePath();
   const language: "js" | "ts" = filePath.endsWith(".ts") || filePath.endsWith(".tsx") ? "ts" : "js";
@@ -60,14 +54,11 @@ export function parseSourceFile(sourceFile: SourceFile): FileParseResult {
   };
 }
 
-/** Convenience: load + parse a batch of files in one call. */
 export function parseFiles(filePaths: string[], tsConfigFilePath?: string): FileParseResult[] {
   const project = createProject(tsConfigFilePath);
   const sourceFiles = loadSourceFiles(project, filePaths);
   return sourceFiles.map(parseSourceFile);
 }
-
-// ---- internals -------------------------------------------------------
 
 type SmellableNode =
   | FunctionDeclaration
@@ -104,7 +95,6 @@ function getNodeName(node: SmellableNode, kind: NodeKind): string {
 
 function getImportSpecifiers(sourceFile: SourceFile): string[] {
   const esmImports = sourceFile.getImportDeclarations().map((d) => d.getModuleSpecifierValue());
-  // CommonJS: require("...") calls — needed since test-target/ is plain JS.
   const cjsImports: string[] = [];
   sourceFile.forEachDescendant((node) => {
     if (Node.isCallExpression(node) && node.getExpression().getText() === "require") {
@@ -118,12 +108,6 @@ function getImportSpecifiers(sourceFile: SourceFile): string[] {
 function getExportNames(sourceFile: SourceFile): string[] {
   const filePath = sourceFile.getFilePath();
   const isTypeScript = filePath.endsWith(".ts") || filePath.endsWith(".tsx");
-
-  // ts-morph's getExportedDeclarations() resolves ESM `export` statements
-  // reliably. For CommonJS `.js` files it depends on the checker's
-  // usage-driven symbol resolution (unreliable with checkJs: false — a file
-  // nothing else requires can resolve to zero exports even with a clear
-  // `module.exports = {...}`), so CJS gets its own explicit scan instead.
   if (isTypeScript) {
     return Array.from(sourceFile.getExportedDeclarations().keys());
   }
@@ -132,13 +116,10 @@ function getExportNames(sourceFile: SourceFile): string[] {
 
 function getCommonJsExportNames(sourceFile: SourceFile): string[] {
   const names = new Set<string>();
-
   sourceFile.forEachDescendant((node) => {
     if (!Node.isBinaryExpression(node)) return;
     const leftText = node.getLeft().getText();
     const right = node.getRight();
-
-    // module.exports = { a, b, c }  /  exports.foo = ... (single named export)
     if (leftText === "module.exports" && Node.isObjectLiteralExpression(right)) {
       right
         .asKindOrThrow(SyntaxKind.ObjectLiteralExpression)
@@ -152,35 +133,13 @@ function getCommonJsExportNames(sourceFile: SourceFile): string[] {
       names.add(leftText.split(".").pop()!);
     }
   });
-
   return Array.from(names);
 }
 
-// McCabe's own widely-cited guidance: complexity above ~10 is where a
-// function starts becoming hard to reason about and test exhaustively —
-// this is the threshold that turns a raw number into a "should be
-// refactored" signal.
 const COMPLEXITY_THRESHOLD = 10;
 
-/**
- * Cyclomatic complexity: start at 1 (one baseline path through the code),
- * and add 1 for every point where execution can branch — an `if`, a loop,
- * a `catch`, a `case`, a ternary, or a short-circuit `&&`/`||`. This is the
- * standard McCabe formula.
- *
- * One deliberate departure from the textbook version: this walks INTO
- * nested function/callback bodies too, rather than stopping at the
- * function boundary. Normally each nested function would get its own
- * separate complexity score — but astEngine only extracts NAMED
- * declarations as their own nodes (see parseSourceFile), so an anonymous
- * callback passed as an argument is never tracked as its own refactor
- * target. Its branching is real complexity the outer function carries, so
- * folding it in here is what makes "callback hell" actually score as
- * complex rather than invisible.
- */
 function computeCyclomaticComplexity(node: SmellableNode, kind: NodeKind): number {
-  if (kind !== "function" && kind !== "method") return 1; // no branching concept for these kinds
-
+  if (kind !== "function" && kind !== "method") return 1;
   let complexity = 1;
   node.forEachDescendant((n) => {
     if (
@@ -191,7 +150,7 @@ function computeCyclomaticComplexity(node: SmellableNode, kind: NodeKind): numbe
       Node.isWhileStatement(n) ||
       Node.isDoStatement(n) ||
       Node.isCatchClause(n) ||
-      Node.isConditionalExpression(n) || // ternary
+      Node.isConditionalExpression(n) ||
       Node.isCaseClause(n)
     ) {
       complexity++;
@@ -228,8 +187,21 @@ function pushIf(smells: CodeSmell[], condition: boolean, type: CodeSmellType, me
   if (condition) smells.push({ type, message, line });
 }
 
+/**
+ * In a plain .js file, types live in JSDoc, not in type nodes. Without this
+ * a function that was already fixed (JSDoc @param/@returns added) would be
+ * flagged again on the next run and re-sent to the LLM — wasted tokens.
+ */
+function hasCompleteJsDocTypes(node: FunctionDeclaration | MethodDeclaration): boolean {
+  const text = node.getJsDocs().map((d) => d.getText()).join("\n");
+  const typedParams = (text.match(/@param\s+\{/g) ?? []).length;
+  const hasReturnType = /@returns?\s+\{/.test(text);
+  return typedParams >= node.getParameters().length && hasReturnType;
+}
+
 function hasUntypedSignature(node: SmellableNode): boolean {
   if (!Node.isFunctionDeclaration(node) && !Node.isMethodDeclaration(node)) return false;
+  if (/\.jsx?$/.test(node.getSourceFile().getFilePath()) && hasCompleteJsDocTypes(node)) return false;
   const noReturnType = !node.getReturnTypeNode();
   const anyUntypedParam = node.getParameters().some((p) => !p.getTypeNode());
   return noReturnType || anyUntypedParam;

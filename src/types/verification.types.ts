@@ -27,6 +27,7 @@ export interface TestFailure {
 export interface StageResult {
   stage: "typecheck" | "lint" | "test";
   passed: boolean;
+  skipped?: boolean; // the stage couldn't run for this file; `passed` is then true only so it doesn't block the task
   exitCode: number;
   diagnostics?: CompilerDiagnostic[];
   violations?: LintViolation[];

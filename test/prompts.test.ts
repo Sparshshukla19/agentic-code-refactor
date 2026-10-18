@@ -39,4 +39,8 @@ describe("buildRetryFeedback", () => {
     const feedback = buildRetryFeedback("Converted callback to async/await.", ["some error"]);
     expect(feedback).toContain("Converted callback to async/await.");
   });
+
+  it("warns against calling a callback both inside a try and from its catch", () => {
+    expect(SYSTEM_PROMPT).toContain("OUTSIDE any try block");
+  });
 });

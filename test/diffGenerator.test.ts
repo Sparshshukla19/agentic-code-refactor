@@ -83,4 +83,13 @@ describe("formatDiffReport", () => {
     });
     expect(report).toContain("verification failed after 3 attempt(s)");
   });
+
+  it("includes measured API usage, and omits the section when no call was made", () => {
+    const base = { branchName: "b", baseBranch: "main", diff: "", tasksSummary: [] };
+    const withUsage = formatDiffReport({ ...base, actualUsage: { calls: 3, promptTokens: 1500, completionTokens: 200 } });
+    expect(withUsage).toContain("Actual API Usage");
+    expect(withUsage).toContain("3 call(s) billed 1500 prompt + 200 completion tokens (1700 total)");
+    expect(formatDiffReport({ ...base, actualUsage: { calls: 0, promptTokens: 0, completionTokens: 0 } })).not.toContain("Actual API Usage");
+    expect(formatDiffReport(base)).not.toContain("Actual API Usage");
+  });
 });

@@ -1,25 +1,37 @@
 // Legacy untyped file with nested callback hell — a target for refactoring.
 
-function fetchUserData(userId, callback) {
-  getUserFromDb(userId, function (err, user) {
-    if (err) {
-      callback(err);
-    } else {
-      getOrdersForUser(user.id, function (err2, orders) {
-        if (err2) {
-          callback(err2);
-        } else {
-          getPaymentsForOrders(orders, function (err3, payments) {
-            if (err3) {
-              callback(err3);
-            } else {
-              callback(null, { user, orders, payments });
-            }
-          });
-        }
+/**
+ * @param {string|number} userId
+ * @param {Function} callback
+ * @returns {Promise<void>}
+ */
+async function fetchUserData(userId, callback) {
+  let result;
+  try {
+    const user = await new Promise((resolve, reject) => {
+      getUserFromDb(userId, function (err, data) {
+        if (err) reject(err);
+        else resolve(data);
       });
-    }
-  });
+    });
+    const orders = await new Promise((resolve, reject) => {
+      getOrdersForUser(user.id, function (err, data) {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+    const payments = await new Promise((resolve, reject) => {
+      getPaymentsForOrders(orders, function (err, data) {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+    result = { user, orders, payments };
+  } catch (err) {
+    callback(err);
+    return;
+  }
+  callback(null, result);
 }
 
 function getUserFromDb(userId, cb) {

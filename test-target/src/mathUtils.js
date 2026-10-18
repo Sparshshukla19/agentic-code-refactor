@@ -5,14 +5,24 @@ function add(a, b) {
   return a + b;
 }
 
+/**
+ * @param {number[]} numbers
+ * @returns {number}
+ */
 function average(numbers) {
-  var total = 0;
-  for (var i = 0; i < numbers.length; i++) {
+  let total = 0;
+  for (let i = 0; i < numbers.length; i++) {
     total += numbers[i];
   }
   return total / numbers.length;
 }
 
+/**
+ * @param {number} value
+ * @param {number} min
+ * @param {number} max
+ * @returns {number}
+ */
 function clamp(value, min, max) {
   if (value < min) return min;
   if (value > max) return max;

@@ -126,7 +126,12 @@ export function buildProgram(): Command {
 
         const passed = result.taskOutcomes.filter((t) => t.passed).length;
         console.log(`\n${passed}/${result.taskOutcomes.length} task(s) verified.`);
-        console.log(`Tokens: ~${result.tokenSavings.estimatedSliceTokens} sent vs ~${result.tokenSavings.estimatedFullFileTokens} for whole-file sends (${result.tokenSavings.reductionPercent}% smaller).`);
+        console.log(`Context slices (estimate): ~${result.tokenSavings.estimatedSliceTokens} sent vs ~${result.tokenSavings.estimatedFullFileTokens} for whole-file sends (${result.tokenSavings.reductionPercent}% smaller).`);
+
+        const u = result.actualUsage;
+        if (u.calls > 0) {
+          console.log(`API usage (measured): ${u.calls} call(s), ${u.promptTokens} prompt + ${u.completionTokens} completion = ${u.promptTokens + u.completionTokens} tokens.`);
+        }
 
         if (result.diffReport) {
           const reportDir = path.resolve(".autorefactor-work");

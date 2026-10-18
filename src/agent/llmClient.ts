@@ -119,6 +119,99 @@ function timeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 180_000;
 }
 
+/** Base delay for our own retry backoff (doubles each retry, capped at 60s). */
+function retryBaseMs(): number {
+  const n = Number(process.env.LLM_RETRY_BASE_MS);
+  return process.env.LLM_RETRY_BASE_MS && Number.isFinite(n) && n >= 0 ? n : 2000;
+}
+
+export interface RetryInfo {
+  attempt: number; // which retry this is (1-based)
+  maxRetries: number;
+  waitMs: number;
+  reason: string;
+}
+
+/** Tokens the API actually billed for one successful call (not an estimate). */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+export interface CallHooks {
+  /** Called after each successful call with the provider-reported token counts. */
+  onUsage?: (usage: TokenUsage) => void;
+  /** Called just before waiting to retry, so the caller can tell the user WHY it is waiting. */
+  onRetry?: (info: RetryInfo) => void;
+}
+
+interface ApiFailure {
+  retryable: boolean;
+  reason: string;
+  waitMs?: number;
+  /** Set when retrying cannot help; the message to fail with immediately. */
+  fatalMessage?: string;
+}
+
+/**
+ * Decides what to do about a failed API call. Duck-typed rather than using
+ * the SDK's APICallError class so it works regardless of SDK version (and
+ * under test mocks). Why we do our own retries instead of the SDK's: the
+ * SDK waits silently, so a rate-limited run looked frozen with no clue why.
+ * Doing it here lets us print the reason and, more importantly, stop at
+ * once on errors that waiting can never fix.
+ */
+function classifyApiError(err: unknown): ApiFailure {
+  const e = err as { statusCode?: number; isRetryable?: boolean; responseBody?: string; responseHeaders?: Record<string, string>; message?: string };
+  const status = e.statusCode;
+  const body = e.responseBody ?? "";
+  const detail = (e.message ?? "unknown error").slice(0, 200);
+  const retryable = e.isRetryable === true || (status !== undefined && [408, 409, 429, 500, 502, 503, 504].includes(status));
+  if (!retryable) return { retryable: false, reason: detail };
+
+  if (status === 429 && /limit:\s*0\b/.test(body)) {
+    return {
+      retryable: false,
+      reason: detail,
+      fatalMessage: `has no free-tier quota (the API reports a quota limit of 0). Choose a different model in LLM_MODEL_CHEAP / LLM_MODEL_CAPABLE. API said: ${detail}`,
+    };
+  }
+  if (status === 429 && /PerDay/i.test(body)) {
+    return {
+      retryable: false,
+      reason: detail,
+      fatalMessage: `daily quota is used up, so waiting won't help. Wait for it to reset, or switch model/provider. API said: ${detail}`,
+    };
+  }
+
+  // Prefer the server's own instruction about how long to wait.
+  let waitMs: number | undefined;
+  const retryAfter = Number(e.responseHeaders?.["retry-after"]);
+  if (e.responseHeaders?.["retry-after"] !== undefined && Number.isFinite(retryAfter)) waitMs = retryAfter * 1000;
+  const delayMatch = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  if (waitMs === undefined && delayMatch) waitMs = Number(delayMatch[1]) * 1000;
+  if (waitMs !== undefined) waitMs = Math.min(waitMs, 120_000);
+
+  const label = status === 429 ? "rate limited (429)" : `server error (${status ?? "network"})`;
+  return { retryable: true, reason: `${label}: ${detail}`, waitMs };
+}
+
+/** A sleep that ends early, by rejecting, if the call's overall time limit passes. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 const MULTI_ISSUE_THRESHOLD = 2;
 
 export function pickModelTier(node: Pick<ParsedNode, "complexity" | "smells">): ModelTier {
@@ -136,6 +229,7 @@ export async function generateRefactorPatch(
   objective: RefactorObjective,
   tier: ModelTier,
   priorTurns: ConversationTurn[] = [],
+  hooks: CallHooks = {},
 ): Promise<AgentToolCall> {
   const apiKeyVar = requiredApiKeyEnvVar();
   if (!process.env[apiKeyVar]) {
@@ -153,15 +247,33 @@ export async function generateRefactorPatch(
       : { role: "user" as const, content: buildUserMessage(objective) };
 
   const limitMs = timeoutMs();
+  const signal = AbortSignal.timeout(limitMs); // one clock for the whole call, retries and waits included
+  const maxRetries = apiRetries();
   try {
-    const { object } = await generateObject({
-      model: getModel(tier),
-      schema: AgentToolCallSchema,
-      maxRetries: apiRetries(),
-      abortSignal: AbortSignal.timeout(limitMs),
-      messages: [systemMessage, userMessage, ...priorTurns],
-    });
-    return object;
+    for (let retry = 0; ; retry++) {
+      try {
+        const { object, usage } = await generateObject({
+          model: getModel(tier),
+          schema: AgentToolCallSchema,
+          maxRetries: 0, // retries are handled below, where they can be reported
+          abortSignal: signal,
+          messages: [systemMessage, userMessage, ...priorTurns],
+        });
+        // Providers that don't report usage give NaN or nothing — skip rather than count garbage.
+        if (usage && Number.isFinite(usage.promptTokens) && Number.isFinite(usage.completionTokens)) {
+          hooks.onUsage?.({ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens });
+        }
+        return object;
+      } catch (err) {
+        const failure = classifyApiError(err);
+        if (failure.fatalMessage) throw new Error(`${describeModel(tier)} ${failure.fatalMessage}`);
+        if (!failure.retryable || retry >= maxRetries) throw err;
+
+        const waitMs = failure.waitMs ?? Math.min(2 ** retry * retryBaseMs(), 60_000);
+        hooks.onRetry?.({ attempt: retry + 1, maxRetries, waitMs, reason: failure.reason });
+        await sleep(waitMs, signal);
+      }
+    }
   } catch (err) {
     const name = (err as { name?: string }).name;
     if (name === "TimeoutError" || name === "AbortError") {

@@ -1,16 +1,9 @@
 /**
  * System instructions and per-task message templates.
- *
- * SYSTEM_PROMPT is the STATIC part of every call — the one thing that
- * never changes between tasks. This is deliberately what gets marked
- * cacheable in llmClient.ts: Anthropic only reuses a cached prefix when
- * it's byte-for-byte identical across calls, so any per-task detail
- * (the actual code, the specific instruction) belongs in
- * buildUserMessage() instead, never here.
  */
 import type { RefactorObjective } from "../types/agent.types.js";
 
-export const SYSTEM_PROMPT = `You are a careful, conservative TypeScript refactoring agent.
+export const SYSTEM_PROMPT = `You are a careful, conservative JavaScript and TypeScript refactoring agent.
 
 You will be given a small slice of code: one target function/method to fix, a plain-language instruction describing what's wrong with it, and (sometimes) the signatures or bodies of other functions in the same file that it calls.
 
@@ -25,18 +18,14 @@ Rules, in order of importance:
 3. Return the COMPLETE new source text for the target node in newSourceText — not a diff, not a partial snippet, not "...rest unchanged...". It replaces the original node's text wholesale.
 4. Never invent APIs, imports, types, or helper functions that weren't shown to you in the slice.
 5. Keep the same function or variable name as the original — the rest of the codebase refers to it by that name.
-6. If referenced helper functions were shown to you only as a signature (body omitted for brevity), assume that signature is accurate and do not guess at or alter its implementation.`;
+6. Match the file's language. If the instruction says the file is plain JavaScript, never use TypeScript-only syntax — type information goes in JSDoc comments.
+7. When converting callback code to async/await while keeping a callback parameter, call the callback OUTSIDE any try block whose catch clause also calls it. Otherwise, if the callback itself throws, the catch runs and calls it a second time.
+8. If referenced helper functions were shown to you only as a signature (body omitted for brevity), assume that signature is accurate and do not guess at or alter its implementation.`;
 
-/** The per-task user turn: the specific instruction and the minimal context slice for this one function. */
 export function buildUserMessage(objective: RefactorObjective): string {
   return `Instruction: ${objective.instruction}\n\n${objective.contextSlice}`;
 }
 
-/**
- * The follow-up turn a retry sends after a proposed patch fails
- * verification (tsc/eslint/tests) — see sandbox/reflector.ts, not yet
- * built. Kept here since it's still a prompt template, not control flow.
- */
 export function buildRetryFeedback(previousExplanation: string, errors: string[]): string {
   return [
     "Your previous patch failed verification.",

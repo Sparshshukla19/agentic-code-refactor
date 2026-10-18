@@ -24,6 +24,7 @@ export interface DiffReportOptions {
   diff: string;
   tasksSummary: TaskSummaryEntry[];
   tokenSavings?: TokenSavingsReport;
+  actualUsage?: { calls: number; promptTokens: number; completionTokens: number };
 }
 
 /** Formats the full markdown report: task outcomes, token savings, and the raw diff. */
@@ -47,6 +48,16 @@ export function formatDiffReport(opts: DiffReportOptions): string {
     lines.push(
       `Sent ~${opts.tokenSavings.estimatedSliceTokens} tokens across this run, versus ~${opts.tokenSavings.estimatedFullFileTokens} ` +
         `a naive whole-file approach would have used — **${opts.tokenSavings.reductionPercent}% smaller**.`,
+    );
+  }
+
+  if (opts.actualUsage && opts.actualUsage.calls > 0) {
+    const u = opts.actualUsage;
+    lines.push("");
+    lines.push("## Actual API Usage");
+    lines.push(
+      `${u.calls} call(s) billed ${u.promptTokens} prompt + ${u.completionTokens} completion tokens ` +
+        `(${u.promptTokens + u.completionTokens} total). Prompt tokens include the fixed system prompt sent with every call.`,
     );
   }
 
